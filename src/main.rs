@@ -48,8 +48,6 @@ struct CreateJobRequest {
     base: String,
     #[serde(default)]
     options: Option<SearchOptions>,
-    #[serde(default)]
-    wait: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -67,6 +65,8 @@ struct SearchOptions {
     odometer: Option<bool>,
     gpu_ids: Option<Vec<u32>>,
     gpu_weights: Option<Vec<f64>>,
+    min_best_lz: Option<u32>,
+    min_total_nonce: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -138,7 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Router::new()
         .route("/api/v1/jobs", post(create_job).get(list_jobs))
-        .route("/api/v1/jobs/:id", get(get_job))
+        .route("/api/v1/jobs/{id}", get(get_job))
         .with_state(state.clone());
 
     println!("bro API server listening on {}", addr);
@@ -160,7 +160,6 @@ async fn create_job(
     if let Some(opts) = payload.options {
         apply_options(&mut config, opts)?;
     }
-    let wait = payload.wait.unwrap_or(false);
 
     let permit = state
         .concurrency
@@ -183,123 +182,71 @@ async fn create_job(
     }
 
     let runner_state = state.clone();
-    if wait {
-        let _permit = permit;
-        let started_at = SystemTime::now();
-        {
-            let mut jobs = runner_state.jobs.write().await;
-            if let Some(job) = jobs.get_mut(&job_id) {
-                job.status = JobStatus::Running { started_at };
-            }
-        }
-
-        let result = tokio::task::spawn_blocking(move || run_search(config)).await;
-        let finished_at = SystemTime::now();
-
-        let mut status = "completed".to_string();
-        let mut outcome_opt: Option<SearchOutcome> = None;
-        let mut error_opt: Option<String> = None;
-        let mut http_status = StatusCode::OK;
-
-        match result {
-            Ok(Ok(outcome)) => {
-                outcome_opt = Some(outcome.clone());
-                let mut jobs = runner_state.jobs.write().await;
-                if let Some(job) = jobs.get_mut(&job_id) {
-                    job.status = JobStatus::Completed {
-                        started_at,
-                        finished_at,
-                        outcome,
-                    };
-                }
-            }
-            Ok(Err(err)) => {
-                status = "failed".to_string();
-                error_opt = Some(err.to_string());
-                http_status = StatusCode::INTERNAL_SERVER_ERROR;
-                let mut jobs = runner_state.jobs.write().await;
-                if let Some(job) = jobs.get_mut(&job_id) {
-                    job.status = JobStatus::Failed {
-                        started_at: Some(started_at),
-                        finished_at,
-                        message: err.to_string(),
-                    };
-                }
-            }
-            Err(join_err) => {
-                status = "failed".to_string();
-                let msg = format!("worker panic: {join_err}");
-                error_opt = Some(msg.clone());
-                http_status = StatusCode::INTERNAL_SERVER_ERROR;
-                let mut jobs = runner_state.jobs.write().await;
-                if let Some(job) = jobs.get_mut(&job_id) {
-                    job.status = JobStatus::Failed {
-                        started_at: Some(started_at),
-                        finished_at,
-                        message: msg,
-                    };
-                }
-            }
-        }
-
-        return Ok((
-            http_status,
-            Json(CreateJobResponse {
-                job_id,
-                status,
-                result: outcome_opt,
-                error: error_opt,
-            }),
-        ));
-    }
-
-    tokio::spawn(async move {
-        let _permit = permit;
-        let started_at = SystemTime::now();
-        {
-            let mut jobs = runner_state.jobs.write().await;
-            if let Some(job) = jobs.get_mut(&job_id) {
-                job.status = JobStatus::Running { started_at };
-            }
-        }
-
-        let result = tokio::task::spawn_blocking(move || run_search(config)).await;
-        let finished_at = SystemTime::now();
+    let _permit = permit;
+    let started_at = SystemTime::now();
+    {
         let mut jobs = runner_state.jobs.write().await;
         if let Some(job) = jobs.get_mut(&job_id) {
-            match result {
-                Ok(Ok(outcome)) => {
-                    job.status = JobStatus::Completed {
-                        started_at,
-                        finished_at,
-                        outcome,
-                    };
-                }
-                Ok(Err(err)) => {
-                    job.status = JobStatus::Failed {
-                        started_at: Some(started_at),
-                        finished_at,
-                        message: err.to_string(),
-                    };
-                }
-                Err(join_err) => {
-                    job.status = JobStatus::Failed {
-                        started_at: Some(started_at),
-                        finished_at,
-                        message: format!("worker panic: {join_err}"),
-                    };
-                }
+            job.status = JobStatus::Running { started_at };
+        }
+    }
+
+    let result = tokio::task::spawn_blocking(move || run_search(config)).await;
+    let finished_at = SystemTime::now();
+
+    let mut status = "completed".to_string();
+    let mut outcome_opt: Option<SearchOutcome> = None;
+    let mut error_opt: Option<String> = None;
+    let mut http_status = StatusCode::OK;
+
+    match result {
+        Ok(Ok(outcome)) => {
+            outcome_opt = Some(outcome.clone());
+            let mut jobs = runner_state.jobs.write().await;
+            if let Some(job) = jobs.get_mut(&job_id) {
+                job.status = JobStatus::Completed {
+                    started_at,
+                    finished_at,
+                    outcome,
+                };
             }
         }
-    });
+        Ok(Err(err)) => {
+            status = "failed".to_string();
+            error_opt = Some(err.to_string());
+            http_status = StatusCode::INTERNAL_SERVER_ERROR;
+            let mut jobs = runner_state.jobs.write().await;
+            if let Some(job) = jobs.get_mut(&job_id) {
+                job.status = JobStatus::Failed {
+                    started_at: Some(started_at),
+                    finished_at,
+                    message: err.to_string(),
+                };
+            }
+        }
+        Err(join_err) => {
+            status = "failed".to_string();
+            let msg = format!("worker panic: {join_err}");
+            error_opt = Some(msg.clone());
+            http_status = StatusCode::INTERNAL_SERVER_ERROR;
+            let mut jobs = runner_state.jobs.write().await;
+            if let Some(job) = jobs.get_mut(&job_id) {
+                job.status = JobStatus::Failed {
+                    started_at: Some(started_at),
+                    finished_at,
+                    message: msg,
+                };
+            }
+        }
+    }
 
     Ok((
-        StatusCode::ACCEPTED,
+        http_status,
         Json(CreateJobResponse {
             job_id,
-            status: "pending".to_string(),
-            result: None,
-            error: None,
+            status,
+            result: outcome_opt,
+            error: error_opt,
         }),
     ))
 }
@@ -414,6 +361,12 @@ fn apply_options(config: &mut SearchConfig, opts: SearchOptions) -> Result<(), A
     }
     if let Some(ws) = opts.gpu_weights {
         config.gpu_weights = Some(ws);
+    }
+    if let Some(v) = opts.min_best_lz {
+        config.min_best_lz = Some(v);
+    }
+    if let Some(v) = opts.min_total_nonce {
+        config.min_total_nonce = Some(v);
     }
 
     Ok(())

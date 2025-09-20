@@ -63,6 +63,8 @@ pub struct SearchConfig {
     pub odometer: bool,
     pub gpu_ids: Option<Vec<u32>>,
     pub gpu_weights: Option<Vec<f64>>,
+    pub min_best_lz: Option<u32>,
+    pub min_total_nonce: Option<u64>,
 }
 
 impl SearchConfig {
@@ -82,6 +84,8 @@ impl SearchConfig {
             odometer: DEFAULT_ODOMETER,
             gpu_ids: None,
             gpu_weights: None,
+            min_best_lz: None,
+            min_total_nonce: None,
         }
     }
 }
@@ -108,6 +112,28 @@ pub struct SearchOutcome {
 
 pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
     STOP.store(false, Ordering::SeqCst);
+
+    let mut config = config;
+    if let Some(min) = config.min_total_nonce {
+        if min > config.total_nonce_all {
+            return Err(Box::new(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "MIN_TOTAL_NONCE ({}) must be <= TOTAL_NONCE ({})",
+                    min, config.total_nonce_all
+                ),
+            )));
+        }
+    }
+    let target_best_lz = config.min_best_lz;
+    let min_total_nonce = config.min_total_nonce.unwrap_or(0);
+    let mut monitor_interval = config.progress_ms;
+    let user_requested_progress = monitor_interval > 0;
+    let needs_monitor = target_best_lz.is_some() || min_total_nonce > 0;
+    if needs_monitor && monitor_interval == 0 {
+        monitor_interval = 100;
+        config.progress_ms = monitor_interval;
+    }
 
     let base_len = config.base.as_bytes().len();
     let reserve = if config.binary_nonce { 8 } else { 20 };
@@ -262,11 +288,11 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
         }));
     }
 
-    if config.progress_ms > 0 {
+    if monitor_interval > 0 {
         let total_all = config.total_nonce_all;
         let inline = io::stdout().is_terminal();
         loop {
-            thread::sleep(Duration::from_millis(config.progress_ms));
+            thread::sleep(Duration::from_millis(monitor_interval));
             let mut sum_done = 0u64;
             let mut rates: Vec<f64> = Vec::with_capacity(shared_states.len());
             for (i, st) in shared_states.iter().enumerate() {
@@ -280,7 +306,11 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
                 };
                 rates.push(r);
             }
-            let pct = (sum_done as f64) / (total_all as f64) * 100.0;
+            let pct = if total_all > 0 {
+                (sum_done as f64) / (total_all as f64) * 100.0
+            } else {
+                0.0
+            };
             let mut g_best_lz = 0u32;
             let mut g_best_nonce = 0u64;
             for st in &shared_states {
@@ -291,22 +321,34 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
                     g_best_nonce = no;
                 }
             }
-            let mut line = format!("Progress: {:.2}% |", pct.min(100.0));
-            for (i, r) in rates.iter().enumerate() {
-                if i > 0 {
-                    line.push(' ');
+
+            if user_requested_progress {
+                let mut line = format!("Progress: {:.2}% |", pct.min(100.0));
+                for (i, r) in rates.iter().enumerate() {
+                    if i > 0 {
+                        line.push(' ');
+                    }
+                    line.push_str(&format!(" GPU{} {:.2} GH/s", assigned_gpus[i], r));
+                    if i + 1 < rates.len() {
+                        line.push(',');
+                    }
                 }
-                line.push_str(&format!(" GPU{} {:.2} GH/s", assigned_gpus[i], r));
-                if i + 1 < rates.len() {
-                    line.push(',');
+                line.push_str(&format!(" | best_lz={} nonce={}", g_best_lz, g_best_nonce));
+                if inline {
+                    print!("\r{}", line);
+                    let _ = io::stdout().flush();
+                } else {
+                    println!("{}", line);
                 }
             }
-            line.push_str(&format!(" | best_lz={} nonce={}", g_best_lz, g_best_nonce));
-            if inline {
-                print!("\r{}", line);
-                let _ = io::stdout().flush();
-            } else {
-                println!("{}", line);
+
+            if let Some(target) = target_best_lz {
+                if sum_done >= min_total_nonce
+                    && g_best_lz >= target
+                    && !STOP.load(Ordering::SeqCst)
+                {
+                    STOP.store(true, Ordering::SeqCst);
+                }
             }
 
             if shared_states
@@ -316,7 +358,7 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
                 break;
             }
         }
-        if inline {
+        if user_requested_progress && inline {
             println!();
         }
     }
@@ -347,9 +389,13 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
         }
     }
 
+    let total_processed: u64 = shared_states
+        .iter()
+        .map(|st| st.done.load(Ordering::Relaxed))
+        .sum();
     let elapsed = t0.elapsed().as_secs_f64();
     let ghps = if elapsed > 0.0 {
-        (config.total_nonce_all as f64) / elapsed / 1e9
+        (total_processed as f64) / elapsed / 1e9
     } else {
         0.0
     };
@@ -367,7 +413,7 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
         best_nonce,
         elapsed_secs: elapsed,
         rate_ghs: ghps,
-        total_nonce: config.total_nonce_all,
+        total_nonce: total_processed,
         gpu_count,
     })
 }
@@ -543,6 +589,9 @@ fn run_on_device(
             d_best_nonce.copy_to(&mut best_nonce)?;
         } else {
             for batch_idx in 0..num_batches {
+                if STOP.load(Ordering::SeqCst) {
+                    break;
+                }
                 let (start_rel, batch_nonce) = if cfg.batch_size == 0 {
                     (0u64, cfg.total_nonce)
                 } else {

@@ -69,22 +69,23 @@
     -d '{
           "base": "txid:index",
           "options": {
-            "total_nonce": 100000000,
+            "total_nonce": 500000000,
+            "min_total_nonce": 100000000,
+            "min_best_lz": 40,
             "persistent": true,
             "gpu_ids": [0],
             "chunk_size": 262144
           }
-          "wait": true
         }'
   ```
-  - `wait=true`：请求会阻塞到任务完成，返回结果或错误；建议在自控环境使用，需确保客户端超时足够。
-  - 省略或设为 `false`：接口立即返回 `job_id`，任务在后台排队执行。
+- 每次调用会同步等待搜索完成（或失败）后返回结果；在任务执行期间请确保客户端超时设置足够大。
 - 查询单个任务：`GET /api/v1/jobs/{job_id}`，字段含 `status`（pending/running/completed/failed）、时间戳、结果或错误信息。
 - 列出全部任务：`GET /api/v1/jobs`，按提交时间返回所有任务快照，可用于轮询进度。
 
 
 **任务参数（POST /api/v1/jobs 的 options）**
-- `total_nonce` (`u64`，默认 `100_000_000_000_000`)：总搜索次数，支持十进制整数。
+- `total_nonce` (`u64`，默认 `100_000_000_000_000`)：最大搜索次数上限，支持十进制整数。
+- `min_total_nonce` (`u64`)：要求最少执行的搜索次数，需满足 `<= total_nonce`。
 - `start_nonce` (`u64`，默认 `0`)：搜索起始 nonce。
 - `batch_size` (`u64`，默认 `1_000_000_000`)：批处理模式下一次下发的工作量；`0` 表示单批完成。
 - `threads_per_block` (`u32`，默认 `256`)：每个 block 的线程数。
@@ -97,15 +98,14 @@
 - `odometer` (`bool`，默认 `true`)：持久化内核是否启用计数器输出。
 - `gpu_ids` (`[u32]`，默认全卡)：指定使用的 GPU 索引。
 - `gpu_weights` (`[f64]`)：与 `gpu_ids` 对齐的权重，决定工作量占比。
+- `min_best_lz` (`u32`)：目标前导零阈值；达到该值且已完成 `min_total_nonce` 后任务会提前结束。
 
 请求体中的 `base` 字符串需满足 `base_len + (ASCII 时 20 | 二进制时 8) <= 128`，否则任务会立刻失败并返回错误信息。
-
-- 额外字段：根级 `wait`（bool，可选）。设为 `true` 时接口会同步等待任务完成，并在响应中附带结果或错误；默认 `false`，即提交后返回 `job_id` 供后续查询。
 
 
 **与旧版 CLI 的区别**
 - 入口改为 REST 服务，所有参数通过 JSON `options` 传递，不再提示命令行输入或需要交互式确认。
-- 任务按 `job_id` 排队执行（默认单卡一次一个），可通过接口查询状态，而不是依赖终端输出。
+- 每个请求会占用一个 GPU worker 直至任务完成并返回响应，同时写入 `job_id` 供事后查询历史记录。
 - 若仍需脚本化调用，可在外部封装 HTTP 请求；无需再直接运行 `cargo run --release -- "base"` 之类命令。
 
 
