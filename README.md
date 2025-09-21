@@ -56,15 +56,30 @@
     - `ARCHES="sm_89,sm_120" ./build_cubin_ada.sh`
   - 限制寄存器（可影响性能/占用）：
     - `RREG=80 ./build_cubin_ada.sh`
-- 启动 REST API 服务：
-  - `PORT=3000 cargo run --release`
+- 启动 REST API 服务（默认端口 8001，可通过 `PORT` 覆盖）：
+  - `cargo run --release`
 - 停止服务：`Ctrl+C`；持久化模式下会等待当前 chunk 收尾。
+
+
+**Docker 镜像**
+- 需要在宿主机安装 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)，运行容器时通过 `--gpus` 暴露 GPU。
+- 构建镜像（默认编译 `sm_89` 架构，可通过 `--build-arg CUDA_ARCHES=sm_89,sm_75` 自定义多个目标）：
+  - `docker build -t charms-bro-nonce .`
+- 运行：
+  - `docker run --rm --gpus all -p 8001:8001 charms-bro-nonce`
+- 可覆写端口和环境，例如：
+  - `docker run --rm --gpus all -e PORT=8080 -p 8080:8080 charms-bro-nonce`
+- 镜像工作目录 `/app` 下已预置 `sha256_kernel.cubin/ptx`；需要重新生成时可在构建阶段调整 `CUDA_ARCHES` 或修改 `build_cubin_ada.sh`。
+- 推送到 Docker Hub（假设仓库为 `youruser/charms-bro-nonce`）：
+  - `docker tag charms-bro-nonce youruser/charms-bro-nonce:latest`
+  - `docker login`
+  - `docker push youruser/charms-bro-nonce:latest`
 
 
 **API 使用**
 - 创建任务：`POST /api/v1/jobs`
   ```bash
-  curl -X POST http://localhost:3000/api/v1/jobs \
+  curl -X POST http://localhost:8001/api/v1/jobs \
     -H 'content-type: application/json' \
     -d '{
           "outpoint": "txid:index",
@@ -81,6 +96,7 @@
   ```
 - 默认行为：立即返回 `202 Accepted` 和 `job_id`，任务在后台继续执行。
 - 设 `wait=true` 时请求会同步阻塞到任务完成，响应中附带最终结果；使用该模式时请确保客户端超时设置足够大。
+- 再次提交相同 `outpoint` 会直接返回已有任务状态，不会并行启动重复搜索；如需重新搜索可在任务消失后重新提交。
 - 查询单个任务：`GET /api/v1/jobs/{job_id}`，字段含 `status`（pending/running/completed/failed）、时间戳、结果或错误信息；若任务不存在（例如服务重启后），会自动以默认参数重启同名任务并返回 `202 Accepted` 的 `pending` 状态。
 - 列出全部任务：`GET /api/v1/jobs`，按提交时间返回所有任务快照，可用于轮询进度。
 

@@ -270,7 +270,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port = std::env::var("PORT")
         .ok()
         .and_then(|p| p.parse().ok())
-        .unwrap_or(3000u16);
+        .unwrap_or(8001u16);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
     let state = AppState {
@@ -303,6 +303,15 @@ async fn create_job(
         apply_options(&mut config, opts)?;
     }
     let wait = payload.wait.unwrap_or(false);
+
+    if let Some(existing) = {
+        let jobs = state.jobs.read().await;
+        jobs.get(&outpoint)
+            .map(|job| job.to_create_response(&outpoint))
+    } {
+        return Ok((StatusCode::OK, Json(existing)));
+    }
+
     let (status, response) = submit_job(&state, outpoint, config, wait).await?;
     Ok((status, Json(response)))
 }
@@ -340,6 +349,26 @@ async fn list_jobs(State(state): State<AppState>) -> Result<Json<Vec<JobResponse
 }
 
 impl Job {
+    fn to_create_response(&self, id: &str) -> CreateJobResponse {
+        let (status, result, error) = match &self.status {
+            JobStatus::Pending => ("pending".to_string(), None, None),
+            JobStatus::Running { .. } => ("running".to_string(), None, None),
+            JobStatus::Completed { outcome, .. } => {
+                ("completed".to_string(), Some(outcome.clone()), None)
+            }
+            JobStatus::Failed { message, .. } => {
+                ("failed".to_string(), None, Some(message.clone()))
+            }
+        };
+
+        CreateJobResponse {
+            job_id: id.to_string(),
+            status,
+            result,
+            error,
+        }
+    }
+
     fn to_response(&self, id: &str) -> JobResponse {
         let (status, started_at, finished_at, result, error) = match &self.status {
             JobStatus::Pending => ("pending".to_string(), None, None, None, None),
