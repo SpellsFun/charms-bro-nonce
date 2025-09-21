@@ -1,6 +1,6 @@
 # bro: 多 GPU 双重 SHA‑256 碰撞搜索器（Rust + CUDA）
 
-本项目在 GPU 上并行搜索使 `SHA256(SHA256(base + nonce))` 具有最多前导零位（leading zeros）的 `nonce`，并提供 REST API 供外部调用。
+本项目在 GPU 上并行搜索使 `SHA256(SHA256(outpoint + nonce))` 具有最多前导零位（leading zeros）的 `nonce`，并提供 REST API 供外部调用。
 
 - 多 GPU 并行：按权重切分工作量，每张卡独立推进进度。
 - 两种执行模式：
@@ -67,7 +67,7 @@
   curl -X POST http://localhost:3000/api/v1/jobs \
     -H 'content-type: application/json' \
     -d '{
-          "base": "txid:index",
+          "outpoint": "txid:index",
           "options": {
             "total_nonce": 500000000,
             "min_total_nonce": 100000000,
@@ -75,11 +75,13 @@
             "persistent": true,
             "gpu_ids": [0],
             "chunk_size": 262144
-          }
+          },
+          "wait": false
         }'
   ```
-- 每次调用会同步等待搜索完成（或失败）后返回结果；在任务执行期间请确保客户端超时设置足够大。
-- 查询单个任务：`GET /api/v1/jobs/{job_id}`，字段含 `status`（pending/running/completed/failed）、时间戳、结果或错误信息。
+- 默认行为：立即返回 `202 Accepted` 和 `job_id`，任务在后台继续执行。
+- 设 `wait=true` 时请求会同步阻塞到任务完成，响应中附带最终结果；使用该模式时请确保客户端超时设置足够大。
+- 查询单个任务：`GET /api/v1/jobs/{job_id}`，字段含 `status`（pending/running/completed/failed）、时间戳、结果或错误信息；若任务不存在（例如服务重启后），会自动以默认参数重启同名任务并返回 `202 Accepted` 的 `pending` 状态。
 - 列出全部任务：`GET /api/v1/jobs`，按提交时间返回所有任务快照，可用于轮询进度。
 
 
@@ -100,13 +102,17 @@
 - `gpu_weights` (`[f64]`)：与 `gpu_ids` 对齐的权重，决定工作量占比。
 - `min_best_lz` (`u32`)：目标前导零阈值；达到该值且已完成 `min_total_nonce` 后任务会提前结束。
 
-请求体中的 `base` 字符串需满足 `base_len + (ASCII 时 20 | 二进制时 8) <= 128`，否则任务会立刻失败并返回错误信息。
+根级字段：
+- `outpoint` (`string`，必填)：通常为 `txid:index` 这样的交易输出标识，会同时作为搜索前缀与 `job_id`。
+- `wait` (`bool`，默认 `false`)：`true` 时同步等待任务完成，`false`/省略时立即返回 `job_id`。
+
+`outpoint` 字符串需满足 `len(outpoint) + (ASCII 时 20 | 二进制时 8) <= 128`，否则任务会立刻失败并返回错误信息。
 
 
 **与旧版 CLI 的区别**
 - 入口改为 REST 服务，所有参数通过 JSON `options` 传递，不再提示命令行输入或需要交互式确认。
-- 每个请求会占用一个 GPU worker 直至任务完成并返回响应，同时写入 `job_id` 供事后查询历史记录。
-- 若仍需脚本化调用，可在外部封装 HTTP 请求；无需再直接运行 `cargo run --release -- "base"` 之类命令。
+- 后端仍按 `job_id` 排队串行执行（默认单 worker），客户端可选择立即得到 `job_id` 再查询，或以 `wait=true` 等待同步结果。
+- 若仍需脚本化调用，可在外部封装 HTTP 请求；无需再直接运行 `cargo run --release -- "outpoint"` 之类命令。
 
 
 **持久化模式与性能调优**
@@ -120,7 +126,7 @@
 - 报错 `kernel module not found`：先运行 `./build_cubin_ada.sh` 生成 `sha256_kernel.cubin` 或 `sha256_kernel.ptx`。
 - 找不到 `nvcc`：请安装 CUDA Toolkit 并将 `nvcc` 加入 PATH。
 - 没有 `nvidia-smi`：无法自动检测架构，请用 `ARCH/ARCHES` 明确指定目标架构。
-- 输入过长：需满足 `base_len + 20(ASCII) 或 8(二进制) <= 128`。
+- 输入过长：需满足 `len(outpoint) + 20(ASCII) 或 8(二进制) <= 128`。
 - 性能异常：优先使用 CUBIN；根据上述“手动性能调优”逐项验证 `THREADS/BLOCKS/ILP/CHUNK/RREG`。
 - 中断退出：按 Ctrl+C；持久化模式下会触发设备端停止标志，稍候清理完成。
 

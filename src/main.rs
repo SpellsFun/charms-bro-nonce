@@ -11,13 +11,12 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{RwLock, Semaphore};
-use uuid::Uuid;
 
 use bro::{run_search, SearchConfig, SearchOutcome};
 
 #[derive(Clone)]
 struct AppState {
-    jobs: Arc<RwLock<HashMap<Uuid, Job>>>,
+    jobs: Arc<RwLock<HashMap<String, Job>>>,
     concurrency: Arc<Semaphore>,
 }
 
@@ -45,9 +44,11 @@ enum JobStatus {
 
 #[derive(Deserialize)]
 struct CreateJobRequest {
-    base: String,
+    outpoint: String,
     #[serde(default)]
     options: Option<SearchOptions>,
+    #[serde(default)]
+    wait: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -71,7 +72,7 @@ struct SearchOptions {
 
 #[derive(Serialize)]
 struct CreateJobResponse {
-    job_id: Uuid,
+    job_id: String,
     status: String,
     result: Option<SearchOutcome>,
     error: Option<String>,
@@ -79,7 +80,7 @@ struct CreateJobResponse {
 
 #[derive(Serialize)]
 struct JobResponse {
-    job_id: Uuid,
+    job_id: String,
     status: String,
     submitted_at: u64,
     started_at: Option<u64>,
@@ -101,13 +102,6 @@ impl ApiError {
         }
     }
 
-    fn not_found(msg: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::NOT_FOUND,
-            message: msg.into(),
-        }
-    }
-
     fn internal(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -121,6 +115,154 @@ impl IntoResponse for ApiError {
         let body = Json(json!({ "error": self.message }));
         (self.status, body).into_response()
     }
+}
+
+async fn submit_job(
+    state: &AppState,
+    job_id: String,
+    config: SearchConfig,
+    wait: bool,
+) -> Result<(StatusCode, CreateJobResponse), ApiError> {
+    let permit = state
+        .concurrency
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|e| ApiError::internal(format!("failed to acquire worker permit: {e}")))?;
+
+    let submitted_at = SystemTime::now();
+    {
+        let mut jobs = state.jobs.write().await;
+        jobs.insert(
+            job_id.clone(),
+            Job {
+                status: JobStatus::Pending,
+                submitted_at,
+            },
+        );
+    }
+
+    let runner_state = state.clone();
+    if wait {
+        let _permit = permit;
+        let started_at = SystemTime::now();
+        {
+            let mut jobs = runner_state.jobs.write().await;
+            if let Some(job) = jobs.get_mut(&job_id) {
+                job.status = JobStatus::Running { started_at };
+            }
+        }
+
+        let result = tokio::task::spawn_blocking(move || run_search(config)).await;
+        let finished_at = SystemTime::now();
+
+        let mut status = "completed".to_string();
+        let mut outcome_opt: Option<SearchOutcome> = None;
+        let mut error_opt: Option<String> = None;
+        let mut http_status = StatusCode::OK;
+
+        match result {
+            Ok(Ok(outcome)) => {
+                outcome_opt = Some(outcome.clone());
+                let mut jobs = runner_state.jobs.write().await;
+                if let Some(job) = jobs.get_mut(&job_id) {
+                    job.status = JobStatus::Completed {
+                        started_at,
+                        finished_at,
+                        outcome,
+                    };
+                }
+            }
+            Ok(Err(err)) => {
+                status = "failed".to_string();
+                error_opt = Some(err.to_string());
+                http_status = StatusCode::INTERNAL_SERVER_ERROR;
+                let mut jobs = runner_state.jobs.write().await;
+                if let Some(job) = jobs.get_mut(&job_id) {
+                    job.status = JobStatus::Failed {
+                        started_at: Some(started_at),
+                        finished_at,
+                        message: err.to_string(),
+                    };
+                }
+            }
+            Err(join_err) => {
+                status = "failed".to_string();
+                let msg = format!("worker panic: {join_err}");
+                error_opt = Some(msg.clone());
+                http_status = StatusCode::INTERNAL_SERVER_ERROR;
+                let mut jobs = runner_state.jobs.write().await;
+                if let Some(job) = jobs.get_mut(&job_id) {
+                    job.status = JobStatus::Failed {
+                        started_at: Some(started_at),
+                        finished_at,
+                        message: msg,
+                    };
+                }
+            }
+        }
+
+        return Ok((
+            http_status,
+            CreateJobResponse {
+                job_id,
+                status,
+                result: outcome_opt,
+                error: error_opt,
+            },
+        ));
+    }
+
+    let job_id_for_task = job_id.clone();
+    tokio::spawn(async move {
+        let _permit = permit;
+        let started_at = SystemTime::now();
+        {
+            let mut jobs = runner_state.jobs.write().await;
+            if let Some(job) = jobs.get_mut(&job_id_for_task) {
+                job.status = JobStatus::Running { started_at };
+            }
+        }
+
+        let result = tokio::task::spawn_blocking(move || run_search(config)).await;
+        let finished_at = SystemTime::now();
+        let mut jobs = runner_state.jobs.write().await;
+        if let Some(job) = jobs.get_mut(&job_id_for_task) {
+            match result {
+                Ok(Ok(outcome)) => {
+                    job.status = JobStatus::Completed {
+                        started_at,
+                        finished_at,
+                        outcome,
+                    };
+                }
+                Ok(Err(err)) => {
+                    job.status = JobStatus::Failed {
+                        started_at: Some(started_at),
+                        finished_at,
+                        message: err.to_string(),
+                    };
+                }
+                Err(join_err) => {
+                    job.status = JobStatus::Failed {
+                        started_at: Some(started_at),
+                        finished_at,
+                        message: format!("worker panic: {join_err}"),
+                    };
+                }
+            }
+        }
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        CreateJobResponse {
+            job_id,
+            status: "pending".to_string(),
+            result: None,
+            error: None,
+        },
+    ))
 }
 
 #[tokio::main]
@@ -151,126 +293,54 @@ async fn create_job(
     State(state): State<AppState>,
     Json(payload): Json<CreateJobRequest>,
 ) -> Result<(StatusCode, Json<CreateJobResponse>), ApiError> {
-    let base = payload.base.trim().to_string();
-    if base.is_empty() {
-        return Err(ApiError::bad_request("base must not be empty"));
+    let outpoint = payload.outpoint.trim().to_string();
+    if outpoint.is_empty() {
+        return Err(ApiError::bad_request("outpoint must not be empty"));
     }
 
-    let mut config = SearchConfig::with_base(base);
+    let mut config = SearchConfig::with_outpoint(outpoint.clone());
     if let Some(opts) = payload.options {
         apply_options(&mut config, opts)?;
     }
-
-    let permit = state
-        .concurrency
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|e| ApiError::internal(format!("failed to acquire worker permit: {e}")))?;
-
-    let job_id = Uuid::new_v4();
-    let submitted_at = SystemTime::now();
-    {
-        let mut jobs = state.jobs.write().await;
-        jobs.insert(
-            job_id,
-            Job {
-                status: JobStatus::Pending,
-                submitted_at,
-            },
-        );
-    }
-
-    let runner_state = state.clone();
-    let _permit = permit;
-    let started_at = SystemTime::now();
-    {
-        let mut jobs = runner_state.jobs.write().await;
-        if let Some(job) = jobs.get_mut(&job_id) {
-            job.status = JobStatus::Running { started_at };
-        }
-    }
-
-    let result = tokio::task::spawn_blocking(move || run_search(config)).await;
-    let finished_at = SystemTime::now();
-
-    let mut status = "completed".to_string();
-    let mut outcome_opt: Option<SearchOutcome> = None;
-    let mut error_opt: Option<String> = None;
-    let mut http_status = StatusCode::OK;
-
-    match result {
-        Ok(Ok(outcome)) => {
-            outcome_opt = Some(outcome.clone());
-            let mut jobs = runner_state.jobs.write().await;
-            if let Some(job) = jobs.get_mut(&job_id) {
-                job.status = JobStatus::Completed {
-                    started_at,
-                    finished_at,
-                    outcome,
-                };
-            }
-        }
-        Ok(Err(err)) => {
-            status = "failed".to_string();
-            error_opt = Some(err.to_string());
-            http_status = StatusCode::INTERNAL_SERVER_ERROR;
-            let mut jobs = runner_state.jobs.write().await;
-            if let Some(job) = jobs.get_mut(&job_id) {
-                job.status = JobStatus::Failed {
-                    started_at: Some(started_at),
-                    finished_at,
-                    message: err.to_string(),
-                };
-            }
-        }
-        Err(join_err) => {
-            status = "failed".to_string();
-            let msg = format!("worker panic: {join_err}");
-            error_opt = Some(msg.clone());
-            http_status = StatusCode::INTERNAL_SERVER_ERROR;
-            let mut jobs = runner_state.jobs.write().await;
-            if let Some(job) = jobs.get_mut(&job_id) {
-                job.status = JobStatus::Failed {
-                    started_at: Some(started_at),
-                    finished_at,
-                    message: msg,
-                };
-            }
-        }
-    }
-
-    Ok((
-        http_status,
-        Json(CreateJobResponse {
-            job_id,
-            status,
-            result: outcome_opt,
-            error: error_opt,
-        }),
-    ))
+    let wait = payload.wait.unwrap_or(false);
+    let (status, response) = submit_job(&state, outpoint, config, wait).await?;
+    Ok((status, Json(response)))
 }
 
 async fn get_job(
     State(state): State<AppState>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<JobResponse>, ApiError> {
+    Path(id): Path<String>,
+) -> Result<(StatusCode, Json<JobResponse>), ApiError> {
+    if let Some(resp) = {
+        let jobs = state.jobs.read().await;
+        jobs.get(&id).map(|job| job.to_response(&id))
+    } {
+        return Ok((StatusCode::OK, Json(resp)));
+    }
+
+    let (status, _) = submit_job(
+        &state,
+        id.clone(),
+        SearchConfig::with_outpoint(id.clone()),
+        false,
+    )
+    .await?;
     let jobs = state.jobs.read().await;
     let job = jobs
         .get(&id)
-        .ok_or_else(|| ApiError::not_found("job not found"))?;
-    Ok(Json(job.to_response(id)))
+        .ok_or_else(|| ApiError::internal("job missing after submission"))?;
+    Ok((status, Json(job.to_response(&id))))
 }
 
 async fn list_jobs(State(state): State<AppState>) -> Result<Json<Vec<JobResponse>>, ApiError> {
     let jobs = state.jobs.read().await;
-    let mut entries: Vec<JobResponse> = jobs.iter().map(|(id, job)| job.to_response(*id)).collect();
+    let mut entries: Vec<JobResponse> = jobs.iter().map(|(id, job)| job.to_response(id)).collect();
     entries.sort_by_key(|resp| resp.submitted_at);
     Ok(Json(entries))
 }
 
 impl Job {
-    fn to_response(&self, id: Uuid) -> JobResponse {
+    fn to_response(&self, id: &str) -> JobResponse {
         let (status, started_at, finished_at, result, error) = match &self.status {
             JobStatus::Pending => ("pending".to_string(), None, None, None, None),
             JobStatus::Running { started_at } => (
@@ -305,7 +375,7 @@ impl Job {
         };
 
         JobResponse {
-            job_id: id,
+            job_id: id.to_string(),
             status,
             submitted_at: system_time_to_secs(self.submitted_at),
             started_at,

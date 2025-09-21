@@ -49,7 +49,7 @@ struct SharedState {
 
 #[derive(Clone, Debug)]
 pub struct SearchConfig {
-    pub base: String,
+    pub outpoint: String,
     pub total_nonce_all: u64,
     pub start_nonce_all: u64,
     pub batch_size: u64,
@@ -68,9 +68,9 @@ pub struct SearchConfig {
 }
 
 impl SearchConfig {
-    pub fn with_base(base: String) -> Self {
+    pub fn with_outpoint(outpoint: String) -> Self {
         Self {
-            base,
+            outpoint,
             total_nonce_all: DEFAULT_TOTAL_NONCE,
             start_nonce_all: DEFAULT_START_NONCE,
             batch_size: DEFAULT_BATCH_SIZE,
@@ -135,13 +135,13 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
         config.progress_ms = monitor_interval;
     }
 
-    let base_len = config.base.as_bytes().len();
+    let base_len = config.outpoint.as_bytes().len();
     let reserve = if config.binary_nonce { 8 } else { 20 };
     if base_len + reserve > 128 {
         return Err(Box::new(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "base string too long: base_len={} (needs base_len + {} <= 128)",
+                "outpoint string too long: len={} (needs len + {} <= 128)",
                 base_len, reserve
             ),
         )));
@@ -257,7 +257,7 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
     let gpu_count = assigned_gpus.len();
 
     let t0 = Instant::now();
-    let fixed_bytes = config.base.into_bytes();
+    let fixed_bytes = config.outpoint.into_bytes();
 
     let mut handles = Vec::new();
     let mut shared_states: Vec<Arc<SharedState>> = Vec::new();
