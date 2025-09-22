@@ -116,13 +116,11 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
     let mut config = config;
     if let Some(min) = config.min_total_nonce {
         if min > config.total_nonce_all {
-            return Err(Box::new(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "MIN_TOTAL_NONCE ({}) must be <= TOTAL_NONCE ({})",
-                    min, config.total_nonce_all
-                ),
-            )));
+            eprintln!(
+                "MIN_TOTAL_NONCE ({}) exceeds TOTAL_NONCE ({}); expanding TOTAL_NONCE to satisfy minimum",
+                min, config.total_nonce_all
+            );
+            config.total_nonce_all = min;
         }
     }
     let target_best_lz = config.min_best_lz;
