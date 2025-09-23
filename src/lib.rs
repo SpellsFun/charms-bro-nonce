@@ -63,8 +63,6 @@ pub struct SearchConfig {
     pub odometer: bool,
     pub gpu_ids: Option<Vec<u32>>,
     pub gpu_weights: Option<Vec<f64>>,
-    pub min_best_lz: Option<u32>,
-    pub min_total_nonce: Option<u64>,
 }
 
 impl SearchConfig {
@@ -76,27 +74,27 @@ impl SearchConfig {
             batch_size: DEFAULT_BATCH_SIZE,
             threads_per_block: DEFAULT_THREADS_PER_BLOCK,
             blocks: DEFAULT_BLOCKS,
-            binary_nonce: false,
-            persistent: false,
+            binary_nonce: DEFAULT_BINARY_NONCE,
+            persistent: DEFAULT_PERSISTENT,
             chunk_size: DEFAULT_CHUNK_SIZE,
             ilp: DEFAULT_ILP,
             progress_ms: DEFAULT_PROGRESS_MS,
             odometer: DEFAULT_ODOMETER,
             gpu_ids: None,
             gpu_weights: None,
-            min_best_lz: None,
-            min_total_nonce: None,
         }
     }
 }
 
-pub const DEFAULT_TOTAL_NONCE: u64 = 100_000_000_000_000;
+pub const DEFAULT_TOTAL_NONCE: u64 = 500_000_000_000;
 pub const DEFAULT_START_NONCE: u64 = 0;
 pub const DEFAULT_BATCH_SIZE: u64 = 1_000_000_000;
-pub const DEFAULT_THREADS_PER_BLOCK: u32 = 256;
-pub const DEFAULT_BLOCKS: u32 = 1024;
-pub const DEFAULT_CHUNK_SIZE: u32 = 65_536;
-pub const DEFAULT_ILP: u32 = 1;
+pub const DEFAULT_THREADS_PER_BLOCK: u32 = 512;
+pub const DEFAULT_BLOCKS: u32 = 4096;
+pub const DEFAULT_CHUNK_SIZE: u32 = 2097152;
+pub const DEFAULT_ILP: u32 = 8;
+pub const DEFAULT_BINARY_NONCE: bool = true;
+pub const DEFAULT_PERSISTENT: bool = true;
 pub const DEFAULT_PROGRESS_MS: u64 = 0;
 pub const DEFAULT_ODOMETER: bool = true;
 
@@ -113,25 +111,9 @@ pub struct SearchOutcome {
 pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
     STOP.store(false, Ordering::SeqCst);
 
-    let mut config = config;
-    if let Some(min) = config.min_total_nonce {
-        if min > config.total_nonce_all {
-            eprintln!(
-                "MIN_TOTAL_NONCE ({}) exceeds TOTAL_NONCE ({}); expanding TOTAL_NONCE to satisfy minimum",
-                min, config.total_nonce_all
-            );
-            config.total_nonce_all = min;
-        }
-    }
-    let target_best_lz = config.min_best_lz;
-    let min_total_nonce = config.min_total_nonce.unwrap_or(0);
-    let mut monitor_interval = config.progress_ms;
+    let config = config;
+    let monitor_interval = config.progress_ms;
     let user_requested_progress = monitor_interval > 0;
-    let needs_monitor = target_best_lz.is_some() || min_total_nonce > 0;
-    if needs_monitor && monitor_interval == 0 {
-        monitor_interval = 100;
-        config.progress_ms = monitor_interval;
-    }
 
     let base_len = config.outpoint.as_bytes().len();
     let reserve = if config.binary_nonce { 8 } else { 20 };
@@ -239,7 +221,7 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
             chunk_size: config.chunk_size,
             ilp: config.ilp,
             progress_ms: config.progress_ms,
-            odometer: config.odometer as u32,
+            odometer: if config.binary_nonce { 0 } else { config.odometer as u32 },
         };
         tasks.push((gpu, gpu_cfg));
     }
@@ -337,15 +319,6 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
                     let _ = io::stdout().flush();
                 } else {
                     println!("{}", line);
-                }
-            }
-
-            if let Some(target) = target_best_lz {
-                if sum_done >= min_total_nonce
-                    && g_best_lz >= target
-                    && !STOP.load(Ordering::SeqCst)
-                {
-                    STOP.store(true, Ordering::SeqCst);
                 }
             }
 
@@ -664,7 +637,18 @@ fn run_on_device(
         }
     }
 
+    let mut final_done = cfg.total_nonce;
+    if cfg.persistent {
+        d_next_index.copy_to(&mut final_done)?;
+        final_done = final_done.min(cfg.total_nonce);
+    }
+
     if let Some(st) = &shared {
+        if cfg.persistent {
+            st.done.store(final_done, Ordering::Relaxed);
+            st.best_lz.store(best_lz, Ordering::Relaxed);
+            st.best_nonce.store(best_nonce, Ordering::Relaxed);
+        }
         st.finished.store(true, Ordering::SeqCst);
         let _ = st.best_lz.fetch_max(best_lz, Ordering::Relaxed);
         if st.best_lz.load(Ordering::Relaxed) == best_lz {

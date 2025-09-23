@@ -4,9 +4,9 @@
 
 - 多 GPU 并行：按权重切分工作量，每张卡独立推进进度。
 - 两种执行模式：
-  - 批处理模式（默认）：主机按批次下发工作，适合中小规模或调试。
-  - 持久化内核（`PERSISTENT=1`）：设备端自取任务，减少往返开销，适合长时间跑满。
-- `nonce` 形式可选：十进制 ASCII（默认）或 8 字节二进制（`BINARY_NONCE=1`）。
+  - 持久化内核（默认）：设备端自取任务，减少往返开销，适合长时间跑满。
+  - 批处理模式：显式关闭持久化，主机按批次下发工作，便于调试。
+- `nonce` 默认使用 8 字节二进制，也可切换回十进制 ASCII 以兼容旧流程。
 - 内核加载：优先加载 `sha256_kernel.cubin`，失败时回退 `sha256_kernel.ptx`（均由 `nvcc` 生成）。
 - REST API：通过 Axum + Tokio 提供 `/api/v1/jobs` 任务接口，外部系统可提交搜索任务、查询状态与结果，取代旧版的命令行交互模式。
 
@@ -55,7 +55,7 @@
   - 指定多架构：
     - `ARCHES="sm_89,sm_120" ./build_cubin_ada.sh`
   - 限制寄存器（可影响性能/占用）：
-    - `RREG=80 ./build_cubin_ada.sh`
+    - `RREG=64 ./build_cubin_ada.sh`
 - 启动 REST API 服务（默认端口 8001，可通过 `PORT` 覆盖）：
   - `cargo run --release`
 - 停止服务：`Ctrl+C`；持久化模式下会等待当前 chunk 收尾。
@@ -84,12 +84,7 @@
     -d '{
           "outpoint": "txid:index",
           "options": {
-            "total_nonce": 500000000,
-            "min_total_nonce": 100000000,
-            "min_best_lz": 40,
-            "persistent": true,
-            "gpu_ids": [0],
-            "chunk_size": 262144
+            "total_nonce": 100000000000
           },
           "wait": false
         }'
@@ -103,20 +98,18 @@
 
 **任务参数（POST /api/v1/jobs 的 options）**
 - `total_nonce` (`u64`，默认 `100_000_000_000_000`)：最大搜索次数上限，支持十进制整数。
-- `min_total_nonce` (`u64`)：要求最少执行的搜索次数，需满足 `<= total_nonce`。
 - `start_nonce` (`u64`，默认 `0`)：搜索起始 nonce。
 - `batch_size` (`u64`，默认 `1_000_000_000`)：批处理模式下一次下发的工作量；`0` 表示单批完成。
-- `threads_per_block` (`u32`，默认 `256`)：每个 block 的线程数。
-- `blocks` (`u32`，默认 `1024`)：一次 launch 的 block 数。
-- `binary_nonce` (`bool`，默认 `false`)：`true` 走 8 字节二进制 nonce，`false` 走十进制 ASCII。
-- `persistent` (`bool`，默认 `false`)：是否启用持久化内核。
-- `chunk_size` (`u32`，默认 `65536`)：持久化模式每次抓取的 chunk 大小。
-- `ilp` (`u32`，默认 `1`)：内核内指令级并行度。
+- `threads_per_block` (`u32`，默认 `512`)：每个 block 的线程数。
+- `blocks` (`u32`，默认 `4096`)：一次 launch 的 block 数。
+- `binary_nonce` (`bool`，默认 `true`)：`true` 使用 8 字节二进制 nonce，`false` 走十进制 ASCII。
+- `persistent` (`bool`，默认 `true`)：是否启用持久化内核。
+- `chunk_size` (`u32`，默认 `2097152`)：持久化模式每次抓取的 chunk 大小。
+- `ilp` (`u32`，默认 `8`)：内核内指令级并行度。
 - `progress_ms` (`u64`，默认 `0`)：>0 时服务端周期性打印进度到 stdout。
-- `odometer` (`bool`，默认 `true`)：持久化内核是否启用计数器输出。
+- `odometer` (`bool`，默认 `true`)：持久化内核是否启用计数器输出；当 `binary_nonce=true` 时会自动关闭。
 - `gpu_ids` (`[u32]`，默认全卡)：指定使用的 GPU 索引。
 - `gpu_weights` (`[f64]`)：与 `gpu_ids` 对齐的权重，决定工作量占比。
-- `min_best_lz` (`u32`)：目标前导零阈值；达到该值且已完成 `min_total_nonce` 后任务会提前结束。
 
 根级字段：
 - `outpoint` (`string`，必填)：通常为 `txid:index` 这样的交易输出标识，会同时作为搜索前缀与 `job_id`。
@@ -133,8 +126,9 @@
 
 **持久化模式与性能调优**
 - 持久化（`persistent=true`）会在 GPU 上长驻线程块，自行从全局计数器领取工作；适合长时间高负载任务。
-- `chunk_size` 决定单次领取的 nonce 数；`65536~524288` 间调整，观察 GH/s 与响应性。
-- 线程/Block 建议以 4090 等 Ada 卡为例从 `threads_per_block=256` 起，逐步尝试 `512`、`1024`，结合 `blocks`、`ilp` 和寄存器限制（可通过 `RREG` 控制）寻找最佳吞吐。
+- RTX 4090 / Ada 架构实测：默认组合 `threads_per_block=512`、`blocks=4096`、`chunk_size=2097152`、`ilp=8`、`binary_nonce=true`、`RREG=64` 可达到约 15–16 GH/s，可在此基础上微调。
+- 若需要降低延迟，可把 `chunk_size` 调小（例如 `524288`）；若想进一步降低 `atomicAdd` 压力，可适度增大，但要注意进度反馈会更慢。
+- 切换回 ASCII nonce 时，请显式设置 `binary_nonce=false`；服务端会自动重新启用 odometer 以保持十进制自增。
 - 多 GPU 时，可通过 `gpu_weights` 在单次任务内按性能分配工作量，或在服务层外部复制多个请求按需拆分。
 
 

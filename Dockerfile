@@ -35,7 +35,7 @@ COPY src ./src
 COPY build_cubin_ada.sh sha256_kernel.cu ./
 
 RUN chmod +x build_cubin_ada.sh && \
-    ARCHES="${CUDA_ARCHES}" ./build_cubin_ada.sh && \
+    ARCHES="${CUDA_ARCHES}" RREG=64 ./build_cubin_ada.sh && \
     if [ ! -f sha256_kernel.ptx ]; then \
         FIRST_ARCH=$(echo "${CUDA_ARCHES}" | cut -d, -f1); \
         COMPUTE_ARCH=$(echo "${FIRST_ARCH}" | sed 's/sm_/compute_/'); \
