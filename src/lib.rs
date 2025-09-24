@@ -93,7 +93,7 @@ pub const DEFAULT_THREADS_PER_BLOCK: u32 = 256;
 pub const DEFAULT_BLOCKS: u32 = 1024;
 pub const DEFAULT_CHUNK_SIZE: u32 = 65_536;
 pub const DEFAULT_ILP: u32 = 1;
-pub const MAX_ILP: u32 = 4;
+pub const MAX_ILP: u32 = 8;
 pub const DEFAULT_PROGRESS_MS: u64 = 0;
 pub const DEFAULT_ODOMETER: bool = true;
 

@@ -506,8 +506,8 @@ void double_sha256_persistent_kernel(const uint8_t* __restrict__ base_message, s
         for(unsigned long long seg = block_start + (unsigned long long)threadIdx.x * (unsigned long long)iters_per_thread;
             seg < block_end; seg += (unsigned long long)blockDim.x * (unsigned long long)iters_per_thread){
 
-            #pragma unroll 4
-            for(uint32_t iter=0; iter<4; ++iter){
+            #pragma unroll 8
+            for(uint32_t iter=0; iter<8; ++iter){
                 if(iter >= iters_per_thread) break;
                 unsigned long long idx = seg + (unsigned long long)iter;
                 if(idx >= block_end) break;
@@ -701,8 +701,8 @@ void double_sha256_persistent_kernel_ascii(const uint8_t* __restrict__ base_mess
         for(unsigned long long seg = block_start + (unsigned long long)threadIdx.x * (unsigned long long)iters_per_thread;
             seg < block_end; seg += (unsigned long long)blockDim.x * (unsigned long long)iters_per_thread){
 
-            #pragma unroll 4
-            for(uint32_t iter=0; iter<4; ++iter){
+            #pragma unroll 8
+            for(uint32_t iter=0; iter<8; ++iter){
                 if(iter >= iters_per_thread) break;
                 unsigned long long idx = seg + (unsigned long long)iter;
                 if(idx >= block_end) break;
