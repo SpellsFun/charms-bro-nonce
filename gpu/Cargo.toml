@@ -1,0 +1,18 @@
+[package]
+name = "gpu"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[features]
+default = ["stub"]
+stub = []
+cuda = ["cust"]
+
+[dependencies]
+cust = { version = "0.3", optional = true }
+anyhow = "1"
+hex = "0.4"
+
+[build-dependencies]
+cc = "1.1"        # 我们只用它来探 nvcc 路径（可选）
