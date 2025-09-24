@@ -7,7 +7,7 @@ compile_error!("enable either the `cuda` or `stub` feature for the gpu crate");
 #[cfg(feature = "cuda")]
 mod cuda {
     use anyhow::{ensure, Result};
-    use cust::{memory::*, prelude::*};
+    use cust::{context::CurrentContext, memory::*, prelude::*};
     use hex::encode as hex_encode;
 
     pub struct Miner {
@@ -41,6 +41,9 @@ mod cuda {
             threads_per_block: u32,
             ilp: u32,
         ) -> Result<(u64, u32, String)> {
+            // quick_init 将上下文绑定在创建线程，这里在工作线程上重新设为 current
+            CurrentContext::set_current(&self._ctx)?;
+
             ensure!(count > 0, "count must be greater than zero");
             ensure!(blocks > 0, "blocks must be greater than zero");
             ensure!(

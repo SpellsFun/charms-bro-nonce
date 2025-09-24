@@ -79,6 +79,7 @@ INFO server: listening on http://0.0.0.0:9000
 | `blocks` | u32 | 自动推导 | CUDA grid 中的 block 数；若指定则与 `threads_per_block`、`ilp` 决定单次 launch 覆盖量 |
 | `ilp` | u32 | 1 | Instruction-level parallelism，单线程连续处理的 nonce 数 |
 | `persistent` | bool | false | 若为 `true`，任务成功完成后再次提交同一 `outpoint` 会直接返回缓存结果 |
+| `wait` | bool | false | 设为 `true` 时请求会阻塞直到任务完成（便于测试）；否则后台执行 |
 
 参数关系说明：
 - `total_nonce` 控制整次请求要完成的搜索量，服务会按 `batch_size`（或显式 `blocks * threads_per_block * ilp`）拆分成多次 kernel launch。
@@ -86,6 +87,7 @@ INFO server: listening on http://0.0.0.0:9000
 - 如果提供了 `blocks`，单次 launch 的理论覆盖量为 `blocks * threads_per_block * ilp`，并与 `batch_size` 取最小值；可用来直接套用历史调优数据。
 - 调整 `threads_per_block` 与 `ilp` 可以针对不同 GPU 的 SM 结构与指令吞吐测试最佳配置。
 - `persistent=true` 表示缓存任务结果：同一 `outpoint` 再次提交将立即返回之前的执行结果；`false` 则会重新创建任务。
+- `wait=true` 会在当前请求内执行并等待任务完成，响应会直接携带结果。适合调试或短任务；生产环境建议继续使用后台模式。
 
 请求示例：
 ```json
@@ -97,7 +99,8 @@ INFO server: listening on http://0.0.0.0:9000
   "threads_per_block": 512,
   "blocks": 4096,
   "ilp": 8,
-  "persistent": true
+  "persistent": true,
+  "wait": false
 }
 ```
 

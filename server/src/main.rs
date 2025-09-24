@@ -94,6 +94,8 @@ struct CreateJobRequest {
     ilp: Option<u32>,
     /// 是否启用持久化：若为 true，完成后相同 outpoint 的请求会直接返回缓存结果。
     persistent: Option<bool>,
+    /// 若为 true，等待任务执行完成后再返回，便于测试/同步调用。
+    wait: Option<bool>,
 }
 
 #[tokio::main]
@@ -132,6 +134,7 @@ async fn create_job(
     }
 
     let persistent = req.persistent.unwrap_or(false);
+    let wait_for_completion = req.wait.unwrap_or(false);
 
     let params = JobParameters {
         outpoint: outpoint.to_string(),
@@ -181,6 +184,49 @@ async fn create_job(
     let miner = state.miner.clone();
     let job_id = outpoint.to_string();
     let params_for_task = params.clone();
+
+    if wait_for_completion {
+        {
+            let mut jobs = jobs_handle.lock().await;
+            if let Some(job) = jobs.get_mut(&job_id) {
+                job.state = JobState::Running;
+            }
+        }
+
+        let outcome = tokio::task::spawn_blocking(move || run_job(&miner, params_for_task)).await;
+
+        let mut jobs = jobs_handle.lock().await;
+        if let Some(job) = jobs.get_mut(&job_id) {
+            match outcome {
+                Ok(Ok(result)) => {
+                    job.state = JobState::Completed;
+                    job.result = Some(result);
+                    job.error = None;
+                }
+                Ok(Err(err)) => {
+                    job.state = JobState::Failed;
+                    job.error = Some(err.to_string());
+                }
+                Err(join_err) => {
+                    job.state = JobState::Failed;
+                    job.error = Some(join_err.to_string());
+                }
+            }
+        }
+
+        let response = jobs
+            .get(&job_id)
+            .map(|entry| JobStatusResponse::from((job_id, entry)))
+            .unwrap();
+
+        let status = if response.status == JobState::Completed {
+            StatusCode::OK
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+
+        return Ok((status, Json(response)));
+    }
 
     tokio::spawn(async move {
         {
