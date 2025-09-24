@@ -93,6 +93,7 @@ pub const DEFAULT_THREADS_PER_BLOCK: u32 = 256;
 pub const DEFAULT_BLOCKS: u32 = 1024;
 pub const DEFAULT_CHUNK_SIZE: u32 = 65_536;
 pub const DEFAULT_ILP: u32 = 1;
+pub const MAX_ILP: u32 = 4;
 pub const DEFAULT_PROGRESS_MS: u64 = 0;
 pub const DEFAULT_ODOMETER: bool = true;
 
@@ -108,6 +109,9 @@ pub struct SearchOutcome {
 
 pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
     STOP.store(false, Ordering::SeqCst);
+
+    let mut config = config;
+    config.ilp = config.ilp.clamp(1, MAX_ILP);
 
     let monitor_interval = config.progress_ms;
     let user_requested_progress = monitor_interval > 0;
@@ -529,6 +533,12 @@ fn run_on_device(
 
             stream.synchronize()?;
 
+            let mut final_done = cfg.total_nonce;
+            d_next_index.copy_to(&mut final_done)?;
+            if final_done > cfg.total_nonce {
+                final_done = cfg.total_nonce;
+            }
+
             let reduce_threads = {
                 let mut t = 1u32;
                 while t < cfg.blocks && t < 1024 {
@@ -555,6 +565,10 @@ fn run_on_device(
 
             d_best_lz.copy_to(&mut best_lz)?;
             d_best_nonce.copy_to(&mut best_nonce)?;
+
+            if let Some(st) = &shared {
+                st.done.store(final_done, Ordering::Relaxed);
+            }
         } else {
             for batch_idx in 0..num_batches {
                 if STOP.load(Ordering::SeqCst) {

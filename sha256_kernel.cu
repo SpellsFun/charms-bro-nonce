@@ -461,6 +461,7 @@ void double_sha256_persistent_kernel(const uint8_t* __restrict__ base_message, s
     const volatile uint32_t* stop_flag)
 {
     extern __shared__ uint8_t sdata[];
+    (void)odometer_ascii;
     const int warps = (blockDim.x + 31) >> 5;
     uint32_t* s_lz = (uint32_t*)sdata;
     uint64_t* s_nonce = (uint64_t*)(s_lz + warps);
@@ -505,16 +506,6 @@ void double_sha256_persistent_kernel(const uint8_t* __restrict__ base_message, s
         for(unsigned long long seg = block_start + (unsigned long long)threadIdx.x * (unsigned long long)iters_per_thread;
             seg < block_end; seg += (unsigned long long)blockDim.x * (unsigned long long)iters_per_thread){
 
-            // Prepare first nonce in this segment
-            unsigned long long idx0 = seg;
-            if(idx0 >= block_end) break;
-            uint64_t nonce0 = start_nonce + (uint64_t)idx0;
-
-            // Local decimal buffer for ASCII mode
-            char decbuf[21]; int dec_len = 0;
-            if(!binary_nonce){ dec_len = itoa_u64_fast4(nonce0, decbuf); }
-
-            // Iterate within segment (consecutive +1)
             #pragma unroll 4
             for(uint32_t iter=0; iter<4; ++iter){
                 if(iter >= iters_per_thread) break;
@@ -522,31 +513,20 @@ void double_sha256_persistent_kernel(const uint8_t* __restrict__ base_message, s
                 if(idx >= block_end) break;
                 uint64_t nonce = start_nonce + (uint64_t)idx;
 
-                if(!binary_nonce && odometer_ascii && iter>0){
-                    // odometer +1 (decimal increment)
-                    int i = dec_len - 1;
-                    for(; i>=0; --i){
-                        if(decbuf[i] != '9'){ decbuf[i] += 1; break; }
-                        decbuf[i] = '0';
-                    }
-                    if(i < 0){ // overflow prepend '1'
-                        for(int j=dec_len; j>0; --j) decbuf[j] = decbuf[j-1];
-                        decbuf[0] = '1';
-                        dec_len += 1;
-                    }
-                }
-
                 // Tail blocks build
                 uint32_t H1[8];
                 #pragma unroll
                 for(int i2=0;i2<8;i2++) H1[i2] = s_mid[i2];
 
                 // Compute nonce length and prepare pointer to ascii buffer when needed
-                const char* usep = NULL; int nonce_len = 0;
-                if(binary_nonce){ nonce_len = 8; }
-                else {
-                    if(odometer_ascii && iter>0){ usep = decbuf; nonce_len = dec_len; }
-                    else { char tmpb[20]; int nlen = itoa_u64_fast4(nonce, tmpb); usep = tmpb; nonce_len = nlen; }
+                const char* usep = NULL;
+                int nonce_len = 0;
+                char ascii_buf[21];
+                if(binary_nonce){
+                    nonce_len = 8;
+                } else {
+                    nonce_len = itoa_u64_fast4(nonce, ascii_buf);
+                    usep = ascii_buf;
                 }
                 uint64_t bit_len = (uint64_t)(base_len + (uint64_t)nonce_len) * 8ull;
 
@@ -678,6 +658,7 @@ void double_sha256_persistent_kernel_ascii(const uint8_t* __restrict__ base_mess
     const volatile uint32_t* stop_flag)
 {
     extern __shared__ uint8_t sdata[];
+    (void)odometer_ascii;
     const int warps = (blockDim.x + 31) >> 5;
     uint32_t* s_lz = (uint32_t*)sdata;
     uint64_t* s_nonce = (uint64_t*)(s_lz + warps);
@@ -720,12 +701,6 @@ void double_sha256_persistent_kernel_ascii(const uint8_t* __restrict__ base_mess
         for(unsigned long long seg = block_start + (unsigned long long)threadIdx.x * (unsigned long long)iters_per_thread;
             seg < block_end; seg += (unsigned long long)blockDim.x * (unsigned long long)iters_per_thread){
 
-            unsigned long long idx0 = seg; if(idx0 >= block_end) break;
-            uint64_t nonce0 = start_nonce + (uint64_t)idx0;
-            char dec0[21]; int len0 = itoa_u64_fast4(nonce0, dec0);
-            char dec1[21]; int len1 = 0;
-            if(iters_per_thread > 1){ unsigned long long idx1 = seg + 1ull; if(idx1 < block_end){ uint64_t nonce1 = start_nonce + (uint64_t)idx1; len1 = itoa_u64_fast4(nonce1, dec1); } }
-
             #pragma unroll 4
             for(uint32_t iter=0; iter<4; ++iter){
                 if(iter >= iters_per_thread) break;
@@ -733,28 +708,9 @@ void double_sha256_persistent_kernel_ascii(const uint8_t* __restrict__ base_mess
                 if(idx >= block_end) break;
                 uint64_t nonce = start_nonce + (uint64_t)idx;
 
-                // choose stream 0/1
-                const char* decp; int declen;
-                if(odometer_ascii && iters_per_thread > 1){
-                    if((iter & 1u)==0u){
-                        // stream 0
-                        if(iter>0){ int i=len0-1; for(; i>=0; --i){ if(dec0[i] != '9'){ dec0[i] += 1; break; } dec0[i]='0'; } if(i<0){ for(int j=len0;j>0;--j) dec0[j]=dec0[j-1]; dec0[0]='1'; len0++; } }
-                        decp = dec0; declen = len0;
-                    } else {
-                        // stream 1
-                        if(iter>1){ int i=len1-1; for(; i>=0; --i){ if(dec1[i] != '9'){ dec1[i] += 1; break; } dec1[i]='0'; } if(i<0){ for(int j=len1;j>0;--j) dec1[j]=dec1[j-1]; dec1[0]='1'; len1++; } }
-                        decp = dec1; declen = (len1>0?len1:itoa_u64_fast4(nonce, (char*)dec1)); if(len1==0) len1 = declen;
-                    }
-                } else if(odometer_ascii){
-                    // single stream odometer
-                    if(iter>0){ int i=len0-1; for(; i>=0; --i){ if(dec0[i] != '9'){ dec0[i] += 1; break; } dec0[i]='0'; } if(i<0){ for(int j=len0;j>0;--j) dec0[j]=dec0[j-1]; dec0[0]='1'; len0++; } }
-                    decp = dec0; declen = len0;
-                } else {
-                    // fallback fresh itoa
-                    char tmpb_local[20];
-                    declen = itoa_u64_fast4(nonce, (char*)tmpb_local);
-                    decp = tmpb_local;
-                }
+                char decp_buf[21];
+                int declen = itoa_u64_fast4(nonce, decp_buf);
+                const char* decp = decp_buf;
 
                 // First hash tail build: assemble words
                 uint32_t H1[8];

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{RwLock, Semaphore};
 
-use bro::{run_search, SearchConfig, SearchOutcome};
+use bro::{run_search, SearchConfig, SearchOutcome, MAX_ILP};
 
 #[derive(Clone)]
 struct AppState {
@@ -445,7 +445,7 @@ fn apply_options(config: &mut SearchConfig, opts: SearchOptions) -> Result<(), A
         config.chunk_size = v;
     }
     if let Some(v) = opts.ilp {
-        config.ilp = v;
+        config.ilp = v.clamp(1, MAX_ILP);
     }
     if let Some(v) = opts.progress_ms {
         config.progress_ms = v;
