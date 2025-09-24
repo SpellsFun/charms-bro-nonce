@@ -66,8 +66,6 @@ struct SearchOptions {
     odometer: Option<bool>,
     gpu_ids: Option<Vec<u32>>,
     gpu_weights: Option<Vec<f64>>,
-    min_best_lz: Option<u32>,
-    min_total_nonce: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -461,12 +459,5 @@ fn apply_options(config: &mut SearchConfig, opts: SearchOptions) -> Result<(), A
     if let Some(ws) = opts.gpu_weights {
         config.gpu_weights = Some(ws);
     }
-    if let Some(v) = opts.min_best_lz {
-        config.min_best_lz = Some(v);
-    }
-    if let Some(v) = opts.min_total_nonce {
-        config.min_total_nonce = Some(v);
-    }
-
     Ok(())
 }

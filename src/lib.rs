@@ -63,8 +63,6 @@ pub struct SearchConfig {
     pub odometer: bool,
     pub gpu_ids: Option<Vec<u32>>,
     pub gpu_weights: Option<Vec<f64>>,
-    pub min_best_lz: Option<u32>,
-    pub min_total_nonce: Option<u64>,
 }
 
 impl SearchConfig {
@@ -84,8 +82,6 @@ impl SearchConfig {
             odometer: DEFAULT_ODOMETER,
             gpu_ids: None,
             gpu_weights: None,
-            min_best_lz: None,
-            min_total_nonce: None,
         }
     }
 }
@@ -113,27 +109,8 @@ pub struct SearchOutcome {
 pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
     STOP.store(false, Ordering::SeqCst);
 
-    let mut config = config;
-    if let Some(min) = config.min_total_nonce {
-        if min > config.total_nonce_all {
-            return Err(Box::new(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "MIN_TOTAL_NONCE ({}) must be <= TOTAL_NONCE ({})",
-                    min, config.total_nonce_all
-                ),
-            )));
-        }
-    }
-    let target_best_lz = config.min_best_lz;
-    let min_total_nonce = config.min_total_nonce.unwrap_or(0);
-    let mut monitor_interval = config.progress_ms;
+    let monitor_interval = config.progress_ms;
     let user_requested_progress = monitor_interval > 0;
-    let needs_monitor = target_best_lz.is_some() || min_total_nonce > 0;
-    if needs_monitor && monitor_interval == 0 {
-        monitor_interval = 100;
-        config.progress_ms = monitor_interval;
-    }
 
     let base_len = config.outpoint.as_bytes().len();
     let reserve = if config.binary_nonce { 8 } else { 20 };
@@ -339,15 +316,6 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
                     let _ = io::stdout().flush();
                 } else {
                     println!("{}", line);
-                }
-            }
-
-            if let Some(target) = target_best_lz {
-                if sum_done >= min_total_nonce
-                    && g_best_lz >= target
-                    && !STOP.load(Ordering::SeqCst)
-                {
-                    STOP.store(true, Ordering::SeqCst);
                 }
             }
 
