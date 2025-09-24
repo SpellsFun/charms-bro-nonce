@@ -6,8 +6,10 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use hex::encode as hex_encode;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, env, net::SocketAddr, sync::Arc};
+use sha2::{Digest, Sha256};
+use std::{collections::HashMap, env, net::SocketAddr, sync::Arc, time::Instant};
 use tokio::sync::Mutex;
 
 #[derive(Clone)]
@@ -45,6 +47,8 @@ struct JobResult {
     best_hash: String,
     searched: u64,
     start_nonce: String,
+    duration_ms: u64,
+    throughput_ghs: f64,
 }
 
 #[derive(Serialize, Clone, Copy, PartialEq, Eq)]
@@ -282,6 +286,7 @@ async fn get_job(
 }
 
 fn run_job(miner: &gpu::Miner, params: JobParameters) -> Result<JobResult> {
+    let started = Instant::now();
     let mut searched = 0u64;
     let mut best_lz = None;
     let mut best_nonce = 0u64;
@@ -337,14 +342,69 @@ fn run_job(miner: &gpu::Miner, params: JobParameters) -> Result<JobResult> {
         searched += u64::from(current_batch);
     }
 
-    let best_lz = best_lz.unwrap_or(0);
+    let best_lz_gpu = best_lz.unwrap_or(0);
+    let elapsed = started.elapsed();
+    let duration_ms = elapsed.as_millis() as u64;
+    let throughput_ghs = if elapsed.as_secs_f64() > 0.0 {
+        (searched as f64 / elapsed.as_secs_f64()) / 1.0e9
+    } else {
+        0.0
+    };
+
+    let (hash_hex, best_lz_cpu) = double_sha256_lz(&params.outpoint, best_nonce);
+
+    if best_hash != hash_hex {
+        println!(
+            "warning: gpu hash {} differs from cpu hash {} for outpoint {} nonce {}",
+            best_hash, hash_hex, params.outpoint, best_nonce
+        );
+    }
+
+    if best_lz_cpu != best_lz_gpu {
+        println!(
+            "warning: gpu lz {} differs from cpu lz {} for outpoint {} nonce {}",
+            best_lz_gpu, best_lz_cpu, params.outpoint, best_nonce
+        );
+    }
 
     Ok(JobResult {
         outpoint: params.outpoint.clone(),
         best_nonce: best_nonce.to_string(),
-        best_lz,
-        best_hash,
+        best_lz: best_lz_cpu,
+        best_hash: hash_hex,
         searched,
         start_nonce: params.start_nonce.to_string(),
+        duration_ms,
+        throughput_ghs,
     })
+}
+
+fn double_sha256_lz(challenge: &str, nonce: u64) -> (String, u32) {
+    let nonce_str = nonce.to_string();
+    let mut message = Vec::with_capacity(challenge.len() + nonce_str.len());
+    message.extend_from_slice(challenge.as_bytes());
+    message.extend_from_slice(nonce_str.as_bytes());
+
+    let mut hasher = Sha256::new();
+    hasher.update(&message);
+    let first = hasher.finalize_reset();
+    hasher.update(&first);
+    let second = hasher.finalize();
+
+    let hash_hex = hex_encode(&second);
+    let mut lz = 0u32;
+    for byte in second.iter() {
+        if *byte == 0 {
+            lz += 8;
+            continue;
+        }
+        for bit in (0..8).rev() {
+            if (byte >> bit) & 1 == 1 {
+                return (hash_hex, lz);
+            }
+            lz += 1;
+        }
+        break;
+    }
+    (hash_hex, lz)
 }

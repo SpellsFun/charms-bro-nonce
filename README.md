@@ -119,13 +119,15 @@ INFO server: listening on http://0.0.0.0:9000
     "best_lz": 23,
     "best_hash": "...",
     "searched": 1000000,
-    "start_nonce": "0"
+    "start_nonce": "0",
+    "duration_ms": 420,
+    "throughput_ghs": 2.38
   },
   "error": null
 }
 ```
 
-当任务尚未完成时 `result` 为空；失败时 `status` 为 `failed` 并在 `error` 字段给出原因。
+当任务尚未完成时 `result` 为空；失败时 `status` 为 `failed` 并在 `error` 字段给出原因。已完成的任务会返回 `duration_ms`（毫秒）与 `throughput_ghs`（换算后的每秒吉哈希速率），便于评估算力效率。
 
 ## 常见问题
 - **`Could not find a cuda installation`**：`cust` 的构建脚本未找到 CUDA Toolkit。确认驱动与 CUDA 安装完整，并检查 `CUDA_HOME`、`PATH`、`LD_LIBRARY_PATH`。
