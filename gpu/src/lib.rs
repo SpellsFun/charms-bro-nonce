@@ -10,6 +10,17 @@ mod cuda {
     use cust::{context::CurrentContext, memory::*, prelude::*};
     use hex::encode as hex_encode;
 
+    #[repr(C)]
+    struct KernelParams {
+        challenge: *const u8,
+        challenge_len: u32,
+        start_nonce: u64,
+        count: u32,
+        ilp: u32,
+        best_digest: *mut u32,
+        best_info: *mut u32,
+    }
+
     pub struct Miner {
         _ctx: Context, // 保持上下文存活
         module: Module,
@@ -57,40 +68,23 @@ mod cuda {
             let d_best_digest = DeviceBuffer::<u32>::zeroed(8)?; // 8 * u32
             let d_best_info = DeviceBuffer::<u32>::zeroed(4)?; // [lz, lo, hi, lock]
 
-            // 换一种方式：获取 "launch_mine" host wrapper 并调用
-            let func = self.module.get_function("launch_mine")?;
-            // 注意：通过 C wrapper 传指针
+            let func = self.module.get_function("mine_kernel")?;
             let clen = challenge.len() as u32;
-            let blocks_i32 =
-                i32::try_from(blocks).map_err(|_| anyhow::anyhow!("blocks exceeds i32"))?;
-            let threads_i32 = i32::try_from(threads_per_block)
-                .map_err(|_| anyhow::anyhow!("threads_per_block exceeds i32"))?;
 
-            let mut stream_ptr = self.stream.as_inner();
-            let mut challenge_ptr = d_challenge.as_device_ptr().as_raw();
-            let mut clen_mut = clen;
-            let mut start_nonce_mut = start_nonce;
-            let mut count_mut = count;
-            let mut ilp_mut = ilp;
-            let mut digest_ptr = d_best_digest.as_device_ptr().as_raw();
-            let mut info_ptr = d_best_info.as_device_ptr().as_raw();
-            let mut blocks_mut = blocks_i32;
-            let mut threads_mut = threads_i32;
-            let args = [
-                &mut stream_ptr as *mut _ as *mut std::ffi::c_void,
-                &mut challenge_ptr as *mut _ as *mut std::ffi::c_void,
-                &mut clen_mut as *mut _ as *mut std::ffi::c_void,
-                &mut start_nonce_mut as *mut _ as *mut std::ffi::c_void,
-                &mut count_mut as *mut _ as *mut std::ffi::c_void,
-                &mut ilp_mut as *mut _ as *mut std::ffi::c_void,
-                &mut digest_ptr as *mut _ as *mut std::ffi::c_void,
-                &mut info_ptr as *mut _ as *mut std::ffi::c_void,
-                &mut blocks_mut as *mut _ as *mut std::ffi::c_void,
-                &mut threads_mut as *mut _ as *mut std::ffi::c_void,
-            ];
+            let mut params = KernelParams {
+                challenge: d_challenge.as_device_ptr().as_raw() as usize as *const u8,
+                challenge_len: clen,
+                start_nonce,
+                count,
+                ilp,
+                best_digest: d_best_digest.as_device_ptr().as_raw() as usize as *mut u32,
+                best_info: d_best_info.as_device_ptr().as_raw() as usize as *mut u32,
+            };
+            let args = [&mut params as *mut _ as *mut std::ffi::c_void];
 
             unsafe {
-                self.stream.launch(&func, (1, 1, 1), (1, 1, 1), 0, &args)?;
+                self.stream
+                    .launch(&func, (blocks, 1, 1), (threads_per_block, 1, 1), 0, &args)?;
             }
             self.stream.synchronize()?;
 
