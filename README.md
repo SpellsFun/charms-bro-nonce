@@ -22,23 +22,45 @@
    export PATH="$CUDA_HOME/bin:$PATH"
    export LD_LIBRARY_PATH="$CUDA_HOME/lib64:$LD_LIBRARY_PATH"
    ```
-   如果 `nvcc` 不在 PATH 中，可通过 `NVCC=/path/to/nvcc` 覆盖。若需要为不同架构生成 PTX，可设置 `CUDA_ARCH=sm_86`（默认值为 `sm_89`，即 RTX 4090）。
+   - `NVCC=/path/to/nvcc`：覆盖默认的 nvcc 路径。
+   - `CUDA_ARCH=sm_86` 或 `ARCH=sm_86`：指定生成 PTX 的目标架构（默认 `sm_89`）。
+   - `CUDA_RREG=64` 或 `RREG=64`：为 nvcc 添加 `-maxrregcount` 限制（可依硬件调参）。
+   - `NVCC_FLAGS="--extra-options"`：追加自定义 nvcc 参数（以空格分隔）。
 
 ## 构建与运行
-默认情况下 `gpu` crate 启用的是 `stub` 特性，只提供占位实现，便于在无 CUDA 环境下编译代码：
+
+### 1. 仅验证代码（无 GPU 环境）
+默认情况下 `gpu` crate 启用 `stub` 特性，提供占位实现，便于在没有 CUDA 的开发机上编译：
 ```bash
-# 无 GPU 环境：验证代码能够通过编译
 cargo build --release
 ```
 
-若要启用真实 CUDA 实现，请关闭默认特性并显式开启 `gpu_cuda`：
+### 2. 单独编译 GPU 模块（可选）
+在有 CUDA 环境时，你可以先确定 GPU crate 能否独立编译成功：
 ```bash
-# GPU 机器上编译/运行
-cargo build --release -p server --no-default-features --features gpu_cuda
-env RUST_LOG=info cargo run --release -p server --no-default-features --features gpu_cuda
+ARCH=sm_89 RREG=64 cargo build -p gpu --release --no-default-features --features cuda
 ```
+`ARCH`/`RREG` 可按需替换为目标架构与寄存器限制，若省略则使用默认值。
 
-> 如果只对 `gpu` crate 进行单独编译，同理使用 `cargo build -p gpu --no-default-features --features cuda`。
+### 3. 编译并运行 Server（会同时编译 GPU 模块）
+```bash
+ARCH=sm_89 RREG=64 cargo build --release -p server --no-default-features --features gpu_cuda
+PORT=8001 RUST_LOG=info ARCH=sm_89 RREG=64 \
+  cargo run --release -p server --no-default-features --features gpu_cuda
+```
+说明：
+- 如果未先执行 `cargo build`，`cargo run` 会自动进行一次编译。
+- 只在需要调优时设置 `ARCH`、`RREG` 等环境变量；否则可以直接省略，使用默认 `sm_89` 与编译器自动分配的寄存器数。
+- `PORT` 控制监听端口（默认为 `8001`），`RUST_LOG=info` 会打印基本运行日志。
+- 也可以直接运行已编好的二进制：`PORT=9000 RUST_LOG=info ./target/release/server`。
+
+启动日志示例：
+```
+$ PORT=9000 RUST_LOG=info cargo run --release -p server --no-default-features --features gpu_cuda
+...
+INFO server: listening on http://0.0.0.0:9000
+```
+日志中带 `http://...` 的行表示服务已可对外提供 API。
 
 服务默认监听 `0.0.0.0:8001`，可通过环境变量 `PORT` 覆盖。API 采用“任务”模式：
 

@@ -13,7 +13,6 @@ mod cuda {
     pub struct Miner {
         _ctx: Context, // 保持上下文存活
         module: Module,
-        func: Function,
         stream: Stream,
     }
 
@@ -23,12 +22,10 @@ mod cuda {
             let _ctx = cust::quick_init()?;
             let ptx = include_str!(concat!(env!("OUT_DIR"), "/kernel.ptx"));
             let module = Module::from_ptx(ptx, &[])?;
-            let func = module.get_function("mine_kernel")?;
             let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
             Ok(Self {
                 _ctx,
                 module,
-                func,
                 stream,
             })
         }
@@ -54,38 +51,43 @@ mod cuda {
 
             // 设备内存准备
             let d_challenge = DeviceBuffer::from_slice(challenge)?;
-            let mut d_best_digest = DeviceBuffer::<u32>::zeroed(8)?; // 8 * u32
-            let mut d_best_info = DeviceBuffer::<u32>::zeroed(4)?; // [lz, lo, hi, lock]
+            let d_best_digest = DeviceBuffer::<u32>::zeroed(8)?; // 8 * u32
+            let d_best_info = DeviceBuffer::<u32>::zeroed(4)?; // [lz, lo, hi, lock]
 
             // 换一种方式：获取 "launch_mine" host wrapper 并调用
-            let launch = self.module.get_function("launch_mine")?;
+            let func = self.module.get_function("launch_mine")?;
             // 注意：通过 C wrapper 传指针
             let clen = challenge.len() as u32;
             let blocks_i32 =
                 i32::try_from(blocks).map_err(|_| anyhow::anyhow!("blocks exceeds i32"))?;
             let threads_i32 = i32::try_from(threads_per_block)
                 .map_err(|_| anyhow::anyhow!("threads_per_block exceeds i32"))?;
-            let mut args = (
-                self.stream.as_inner() as *const _,
-                d_challenge.as_device_ptr(),
-                clen,
-                start_nonce,
-                count,
-                ilp,
-                d_best_digest.as_device_ptr(),
-                d_best_info.as_device_ptr(),
-                blocks_i32,
-                threads_i32,
-            );
+
+            let mut stream_ptr = self.stream.as_inner();
+            let mut challenge_ptr = d_challenge.as_device_ptr().as_raw();
+            let mut clen_mut = clen;
+            let mut start_nonce_mut = start_nonce;
+            let mut count_mut = count;
+            let mut ilp_mut = ilp;
+            let mut digest_ptr = d_best_digest.as_device_ptr().as_raw();
+            let mut info_ptr = d_best_info.as_device_ptr().as_raw();
+            let mut blocks_mut = blocks_i32;
+            let mut threads_mut = threads_i32;
+            let args = [
+                &mut stream_ptr as *mut _ as *mut std::ffi::c_void,
+                &mut challenge_ptr as *mut _ as *mut std::ffi::c_void,
+                &mut clen_mut as *mut _ as *mut std::ffi::c_void,
+                &mut start_nonce_mut as *mut _ as *mut std::ffi::c_void,
+                &mut count_mut as *mut _ as *mut std::ffi::c_void,
+                &mut ilp_mut as *mut _ as *mut std::ffi::c_void,
+                &mut digest_ptr as *mut _ as *mut std::ffi::c_void,
+                &mut info_ptr as *mut _ as *mut std::ffi::c_void,
+                &mut blocks_mut as *mut _ as *mut std::ffi::c_void,
+                &mut threads_mut as *mut _ as *mut std::ffi::c_void,
+            ];
 
             unsafe {
-                launch.launch(
-                    (1, 1, 1),
-                    (1, 1, 1),
-                    0,
-                    &self.stream,
-                    &mut args as *mut _ as *mut std::ffi::c_void,
-                )?;
+                self.stream.launch(&func, (1, 1, 1), (1, 1, 1), 0, &args)?;
             }
             self.stream.synchronize()?;
 

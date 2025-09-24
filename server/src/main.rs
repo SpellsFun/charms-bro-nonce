@@ -104,7 +104,7 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/api/v1/jobs", post(create_job))
-        .route("/api/v1/jobs/:outpoint", get(get_job))
+        .route("/api/v1/jobs/{outpoint}", get(get_job))
         .with_state(state);
 
     let port = env::var("PORT")
