@@ -189,11 +189,19 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
     for &gpu in &gpu_indices {
         let dev = Device::get_device(gpu)?;
         let name = dev.name()?;
-        // 获取计算能力
-        let major = dev.get_attribute(DeviceAttribute::ComputeCapabilityMajor)? as u32;
-        let minor = dev.get_attribute(DeviceAttribute::ComputeCapabilityMinor)? as u32;
-        let arch = format!("sm_{}{}", major, minor);
-        println!("  - GPU {}: {} ({})", gpu, name, arch);
+        // 尝试获取计算能力，如果失败则只显示名称
+        match (
+            dev.get_attribute(DeviceAttribute::ComputeCapabilityMajor),
+            dev.get_attribute(DeviceAttribute::ComputeCapabilityMinor),
+        ) {
+            (Ok(major), Ok(minor)) => {
+                let arch = format!("sm_{}{}", major, minor);
+                println!("  - GPU {}: {} ({})", gpu, name, arch);
+            }
+            _ => {
+                println!("  - GPU {}: {}", gpu, name);
+            }
+        }
     }
 
     if config.total_nonce_all == 0 {
