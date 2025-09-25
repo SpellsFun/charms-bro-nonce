@@ -29,7 +29,7 @@ __device__ __constant__ char DIG2[201] =
     "80818283848586878889"
     "90919293949596979899";
 
-__device__ inline uint32_t rotr(uint32_t x, int n) {
+__device__ __forceinline__ uint32_t rotr(uint32_t x, int n) {
     // Use funnel shift for faster rotates on modern SMs
     return __funnelshift_r(x, x, n);
 }
@@ -42,7 +42,7 @@ __device__ void sha256_compress_block(const uint8_t block[64], uint32_t H[8]) {
         W[t] = ((uint32_t)block[t*4+0]<<24)|((uint32_t)block[t*4+1]<<16)|((uint32_t)block[t*4+2]<<8)|((uint32_t)block[t*4+3]);
     }
     uint32_t a=H[0],b=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7];
-    #pragma unroll 64
+    #pragma unroll
     for(int t=0;t<64;t++){
         uint32_t wt;
         if(t < 16){
@@ -132,7 +132,7 @@ __device__ void sha256_32B_from_words(const uint32_t in[8], uint32_t out_words[8
     for(int i=0;i<8;i++) out_words[i]=H[i];
 }
 
-__device__ inline uint32_t count_leading_zeros_words(const uint32_t* w){
+__device__ __forceinline__ uint32_t count_leading_zeros_words(const uint32_t* w){
     uint32_t cnt=0;
     #pragma unroll
     for(int i=0;i<8;i++){
@@ -150,7 +150,7 @@ __device__ void sha256_compress_words(const uint32_t W0[16], uint32_t H[8]){
     #pragma unroll
     for(int i=0;i<16;i++) W[i] = W0[i];
     uint32_t a=H[0],b=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7];
-    #pragma unroll 64
+    #pragma unroll
     for(int t=0;t<64;t++){
         uint32_t wt;
         if(t<16){ wt = W[t]; }
@@ -259,7 +259,26 @@ __device__ inline int itoa_u64_fast4(uint64_t v, char* out){
     return len;
 }
 
-__device__ inline uint32_t count_leading_zeros32(const uint8_t* h){
+__device__ __forceinline__ int decimal_increment_ascii(char* digits, int len){
+    int pos = len - 1;
+    while(pos >= 0){
+        char c = digits[pos];
+        if(c == '9'){
+            digits[pos] = '0';
+            pos--;
+        } else {
+            digits[pos] = c + 1;
+            return len;
+        }
+    }
+    digits[0] = '1';
+    for(int i = 1; i <= len; ++i){
+        digits[i] = '0';
+    }
+    return len + 1;
+}
+
+__device__ __forceinline__ uint32_t count_leading_zeros32(const uint8_t* h){
     // Scan by 32-bit big-endian words, use __clz for speed
     uint32_t cnt = 0;
     #pragma unroll
@@ -272,7 +291,7 @@ __device__ inline uint32_t count_leading_zeros32(const uint8_t* h){
     return cnt;
 }
 
-__device__ inline void warp_reduce_max(uint32_t &lz, uint64_t &nonce){
+__device__ __forceinline__ void warp_reduce_max(uint32_t &lz, uint64_t &nonce){
     unsigned mask = 0xffffffffu;
     for(int offset=16; offset>0; offset>>=1){
         uint32_t lz_o = __shfl_down_sync(mask, lz, offset);
@@ -282,7 +301,7 @@ __device__ inline void warp_reduce_max(uint32_t &lz, uint64_t &nonce){
 }
 
 // Kernel: 每 block 找局部最大，返回 block 结果
-extern "C" __global__
+extern "C" __global__ __launch_bounds__(512, 1)
 void double_sha256_max_kernel(const uint8_t* __restrict__ base_message, size_t base_len,
     uint64_t start_nonce, uint64_t total_nonce, uint32_t binary_nonce,
     uint64_t* block_best_nonce, uint32_t* block_best_lz)
@@ -451,7 +470,7 @@ void double_sha256_max_kernel(const uint8_t* __restrict__ base_message, size_t b
 }
 
 // Persistent kernel: fetch work via global atomic counter
-extern "C" __global__
+extern "C" __global__ __launch_bounds__(512, 1)
 void double_sha256_persistent_kernel(const uint8_t* __restrict__ base_message, size_t base_len,
     uint64_t start_nonce, uint64_t total_nonce, uint32_t binary_nonce,
     unsigned long long* next_index, // global atomic counter
@@ -461,7 +480,6 @@ void double_sha256_persistent_kernel(const uint8_t* __restrict__ base_message, s
     const volatile uint32_t* stop_flag)
 {
     extern __shared__ uint8_t sdata[];
-    (void)odometer_ascii;
     const int warps = (blockDim.x + 31) >> 5;
     uint32_t* s_lz = (uint32_t*)sdata;
     uint64_t* s_nonce = (uint64_t*)(s_lz + warps);
@@ -503,46 +521,62 @@ void double_sha256_persistent_kernel(const uint8_t* __restrict__ base_message, s
         if(block_end > total_nonce) block_end = total_nonce;
 
         // Process chunk in thread-local contiguous segments of length iters_per_thread
+        const unsigned long long tid_stride = (unsigned long long)blockDim.x * (unsigned long long)iters_per_thread;
         for(unsigned long long seg = block_start + (unsigned long long)threadIdx.x * (unsigned long long)iters_per_thread;
-            seg < block_end; seg += (unsigned long long)blockDim.x * (unsigned long long)iters_per_thread){
+            seg < block_end; seg += tid_stride){
+
+            const bool use_ascii = (binary_nonce == 0u);
+            const bool use_odometer = use_ascii && (odometer_ascii != 0u);
+            char ascii_buf[21];
+            int ascii_len = 0;
+            if(use_odometer){
+                uint64_t first_nonce = start_nonce + (uint64_t)seg;
+                ascii_len = itoa_u64_fast4(first_nonce, ascii_buf);
+            }
+
+            const uint32_t max_iter = iters_per_thread;
+            bool reached_end = false;
 
             #pragma unroll 8
-            for(uint32_t iter=0; iter<8; ++iter){
-                if(iter >= iters_per_thread) break;
+            for(uint32_t iter = 0; iter < 8; ++iter){
+                if(iter >= max_iter) break;
                 unsigned long long idx = seg + (unsigned long long)iter;
-                if(idx >= block_end) break;
+                if(idx >= block_end){ reached_end = true; break; }
                 uint64_t nonce = start_nonce + (uint64_t)idx;
 
-                // Tail blocks build
+                const char* usep = NULL;
+                int nonce_len = 0;
+                if(!use_ascii){
+                    nonce_len = 8;
+                } else {
+                    if(use_odometer){
+                        if(iter > 0){ ascii_len = decimal_increment_ascii(ascii_buf, ascii_len); }
+                        usep = ascii_buf;
+                        nonce_len = ascii_len;
+                    } else {
+                        ascii_len = itoa_u64_fast4(nonce, ascii_buf);
+                        usep = ascii_buf;
+                        nonce_len = ascii_len;
+                    }
+                }
+
                 uint32_t H1[8];
                 #pragma unroll
                 for(int i2=0;i2<8;i2++) H1[i2] = s_mid[i2];
 
-                // Compute nonce length and prepare pointer to ascii buffer when needed
-                const char* usep = NULL;
-                int nonce_len = 0;
-                char ascii_buf[21];
-                if(binary_nonce){
-                    nonce_len = 8;
-                } else {
-                    nonce_len = itoa_u64_fast4(nonce, ascii_buf);
-                    usep = ascii_buf;
-                }
                 uint64_t bit_len = (uint64_t)(base_len + (uint64_t)nonce_len) * 8ull;
 
                 if(rem + nonce_len <= 55){
-                    // One-block fast path with direct word assembly
                     uint32_t W0[16];
                     #pragma unroll
                     for(int ii=0;ii<16;ii++) W0[ii]=0u;
                     int wpos = 0;
-                    // base remainder
                     #pragma unroll
                     for(int j=0;j<rem;j++){
                         int wi = wpos >> 2; int sh = 24 - ((wpos & 3) * 8);
                         W0[wi] |= ((uint32_t)s_base_rem[j]) << sh; wpos++;
                     }
-                    if(binary_nonce){
+                    if(!use_ascii){
                         #pragma unroll
                         for(int j=0;j<8;j++){
                             uint8_t by = (uint8_t)((nonce >> (8*j)) & 0xff);
@@ -555,18 +589,15 @@ void double_sha256_persistent_kernel(const uint8_t* __restrict__ base_message, s
                             W0[wi] |= ((uint32_t)usep[j]) << sh; wpos++;
                         }
                     }
-                    // 0x80 and bit length
                     { int wi = wpos >> 2; int sh = 24 - ((wpos & 3) * 8); W0[wi] |= (0x80u << sh); wpos++; }
                     W0[14] = (uint32_t)(bit_len >> 32);
                     W0[15] = (uint32_t)(bit_len & 0xffffffffu);
                     sha256_compress_words(W0, H1);
                 } else {
-                    // Two-block path: assemble both blocks in words
                     uint32_t Wa[16];
                     #pragma unroll
                     for(int ii=0; ii<16; ++ii) Wa[ii]=0u;
                     int wposA = 0;
-                    // base remainder
                     #pragma unroll
                     for(int j=0;j<rem;j++){
                         int wi = wposA >> 2; int sh = 24 - ((wposA & 3) * 8);
@@ -574,7 +605,7 @@ void double_sha256_persistent_kernel(const uint8_t* __restrict__ base_message, s
                     }
                     int cap = 64 - rem;
                     int n1 = nonce_len < cap ? nonce_len : cap;
-                    if(binary_nonce){
+                    if(!use_ascii){
                         #pragma unroll
                         for(int j=0;j<n1;j++){
                             uint8_t by = (uint8_t)((nonce >> (8*j)) & 0xff);
@@ -596,7 +627,7 @@ void double_sha256_persistent_kernel(const uint8_t* __restrict__ base_message, s
                     for(int ii=0; ii<16; ++ii) Wb[ii]=0u;
                     int wposB = 0;
                     int n2 = nonce_len - n1;
-                    if(binary_nonce){
+                    if(!use_ascii){
                         #pragma unroll
                         for(int j=0;j<n2;j++){
                             uint8_t by = (uint8_t)((nonce >> (8*(j+n1))) & 0xff);
@@ -629,6 +660,8 @@ void double_sha256_persistent_kernel(const uint8_t* __restrict__ base_message, s
                     }
                 }
             }
+
+            if(reached_end) break;
         }
         __syncthreads();
     }
@@ -648,7 +681,7 @@ void double_sha256_persistent_kernel(const uint8_t* __restrict__ base_message, s
 }
 
 // ASCII-only persistent kernel (no binary branches), using odometer and fast itoa
-extern "C" __global__
+extern "C" __global__ __launch_bounds__(512, 1)
 void double_sha256_persistent_kernel_ascii(const uint8_t* __restrict__ base_message, size_t base_len,
     uint64_t start_nonce, uint64_t total_nonce, uint32_t /*binary_nonce_dummy*/,
     unsigned long long* next_index, uint32_t chunk_size, uint32_t iters_per_thread,
@@ -658,7 +691,7 @@ void double_sha256_persistent_kernel_ascii(const uint8_t* __restrict__ base_mess
     const volatile uint32_t* stop_flag)
 {
     extern __shared__ uint8_t sdata[];
-    (void)odometer_ascii;
+    const bool use_odometer = odometer_ascii != 0u;
     const int warps = (blockDim.x + 31) >> 5;
     uint32_t* s_lz = (uint32_t*)sdata;
     uint64_t* s_nonce = (uint64_t*)(s_lz + warps);
@@ -698,28 +731,44 @@ void double_sha256_persistent_kernel_ascii(const uint8_t* __restrict__ base_mess
         unsigned long long block_end = block_start + (unsigned long long)chunk_size;
         if(block_end > total_nonce) block_end = total_nonce;
 
+        const unsigned long long tid_stride = (unsigned long long)blockDim.x * (unsigned long long)iters_per_thread;
         for(unsigned long long seg = block_start + (unsigned long long)threadIdx.x * (unsigned long long)iters_per_thread;
-            seg < block_end; seg += (unsigned long long)blockDim.x * (unsigned long long)iters_per_thread){
+            seg < block_end; seg += tid_stride){
+
+            char ascii_buf[21];
+            int ascii_len = 0;
+            if(use_odometer){
+                uint64_t first_nonce = start_nonce + (uint64_t)seg;
+                ascii_len = itoa_u64_fast4(first_nonce, ascii_buf);
+            }
+
+            const uint32_t max_iter = iters_per_thread;
+            bool reached_end = false;
 
             #pragma unroll 8
-            for(uint32_t iter=0; iter<8; ++iter){
-                if(iter >= iters_per_thread) break;
+            for(uint32_t iter = 0; iter < 8; ++iter){
+                if(iter >= max_iter) break;
                 unsigned long long idx = seg + (unsigned long long)iter;
-                if(idx >= block_end) break;
+                if(idx >= block_end){ reached_end = true; break; }
                 uint64_t nonce = start_nonce + (uint64_t)idx;
 
-                char decp_buf[21];
-                int declen = itoa_u64_fast4(nonce, decp_buf);
-                const char* decp = decp_buf;
+                const char* decp;
+                int nonce_len;
+                if(use_odometer){
+                    if(iter > 0){ ascii_len = decimal_increment_ascii(ascii_buf, ascii_len); }
+                    decp = ascii_buf;
+                    nonce_len = ascii_len;
+                } else {
+                    ascii_len = itoa_u64_fast4(nonce, ascii_buf);
+                    decp = ascii_buf;
+                    nonce_len = ascii_len;
+                }
 
-                // First hash tail build: assemble words
                 uint32_t H1[8];
                 #pragma unroll
                 for(int i2=0;i2<8;i2++) H1[i2] = s_mid[i2];
 
-                int pos = 0; int nonce_len = declen; int cap = 64 - rem;
-                if(pos <= 55){ /* just to satisfy compiler */ }
-                // One-block or two-block paths
+                int cap = 64 - rem;
                 if(rem + nonce_len <= 55){
                     uint32_t W0[16];
                     #pragma unroll
@@ -731,7 +780,6 @@ void double_sha256_persistent_kernel_ascii(const uint8_t* __restrict__ base_mess
                     W0[14]=(uint32_t)(bit_len>>32); W0[15]=(uint32_t)bit_len;
                     sha256_compress_words(W0, H1);
                 } else {
-                    // Two-block
                     uint32_t Wa[16];
                     #pragma unroll
                     for(int ii=0;ii<16;ii++) Wa[ii]=0u; int wA=0;
@@ -750,12 +798,13 @@ void double_sha256_persistent_kernel_ascii(const uint8_t* __restrict__ base_mess
                     sha256_compress_words(Wb, H1);
                 }
 
-                // Second hash from words
                 uint32_t H2[8]; sha256_32B_from_words(H1, H2);
                 uint32_t lz = count_leading_zeros_words(H2);
                 if(lz > local_best_lz){ local_best_lz = lz; local_best_nonce = nonce; }
                 if(enable_live){ unsigned int snap=s_g_best; unsigned int lzu=(unsigned)lz; if(lzu>snap){ unsigned old=atomicMax((unsigned*)g_best_lz_live,lzu); if(lzu>old){ *g_best_nonce_live=nonce; s_g_best=lzu; }}}
             }
+
+            if(reached_end) break;
         }
         __syncthreads();
     }

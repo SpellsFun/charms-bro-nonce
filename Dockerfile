@@ -1,11 +1,11 @@
 # syntax=docker/dockerfile:1.6
 
-ARG CUDA_VERSION=12.4.1
+ARG CUDA_VERSION=12.5.1
 ARG UBUNTU_VERSION=22.04
 ARG RUST_VERSION=1.78.0
 ARG CUDA_ARCHES="sm_89"
 
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS build
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS builder
 
 ARG RUST_VERSION
 ARG CUDA_ARCHES
@@ -35,7 +35,7 @@ COPY src ./src
 COPY build_cubin_ada.sh sha256_kernel.cu ./
 
 RUN chmod +x build_cubin_ada.sh && \
-    ARCHES="${CUDA_ARCHES}" ./build_cubin_ada.sh && \
+    ARCHES="${CUDA_ARCHES}" RREG=64 ./build_cubin_ada.sh && \
     if [ ! -f sha256_kernel.ptx ]; then \
         FIRST_ARCH=$(echo "${CUDA_ARCHES}" | cut -d, -f1); \
         COMPUTE_ARCH=$(echo "${FIRST_ARCH}" | sed 's/sm_/compute_/'); \
@@ -54,8 +54,8 @@ RUN sed -i '/jammy-backports/d' /etc/apt/sources.list && \
 
 WORKDIR /app
 
-COPY --from=build /app/target/release/bro /usr/local/bin/bro
-COPY --from=build /app/sha256_kernel.* ./
+COPY --from=builder /app/target/release/bro /usr/local/bin/bro
+COPY --from=builder /app/sha256_kernel.* ./
 RUN rm -f sha256_kernel.cu
 
 EXPOSE 8001

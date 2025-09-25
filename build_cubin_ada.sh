@@ -5,12 +5,12 @@ set -euo pipefail
 # Override with:
 #   - ARCH=<sm_XX or compute_XX>   (single arch)
 #   - ARCHES="sm_89,sm_120"        (multi-arch)
-#   - RREG=<max registers>
+#   - RREG=<max registers>      (default 64, set 0 to disable limiting)
 #   - OUT=sha256_kernel.cubin
 
 ARCH=${ARCH:-}
 ARCHES=${ARCHES:-}
-RREG=${RREG:-}
+RREG=${RREG:-128}
 OUT=${OUT:-sha256_kernel.cubin}
 
 to_sm() {
@@ -66,13 +66,13 @@ if [[ ${#ARCH_LIST[@]} -eq 0 ]]; then
 fi
 
 # Compose NVCC flags
-NVCC_FLAGS=( -O3 -Xptxas -O3,-v -Xptxas -dlcm=ca )
+NVCC_FLAGS=( -O3 -Xptxas -O3,-v -Xptxas -dlcm=ca -use_fast_math -ftz=true -prec-div=false -prec-sqrt=false )
 for a in "${ARCH_LIST[@]}"; do
   SM=$(to_sm "$a")
   COMPUTE=$(to_compute "$a")
   NVCC_FLAGS+=( -gencode "arch=${COMPUTE},code=${SM}" )
 done
-if [[ -n "$RREG" ]]; then
+if [[ "$RREG" != "0" ]]; then
   NVCC_FLAGS+=( -maxrregcount=${RREG} )
 fi
 
