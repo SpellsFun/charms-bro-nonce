@@ -211,7 +211,6 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
         if len == 0 {
             continue;
         }
-        println!("GPU {}: start_nonce = {} (base: {} + offset: {})", gpu, start, config.start_nonce_all, start_off);
         let gpu_cfg = GpuConfig {
             start_nonce: start,
             total_nonce: len,
@@ -226,6 +225,18 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
             odometer: config.odometer as u32,
         };
         tasks.push((gpu, gpu_cfg));
+    }
+
+    // 输出GPU任务分配信息
+    if !tasks.is_empty() {
+        println!("[Task] Range: {} to {}, Total: {} nonces",
+            config.start_nonce_all,
+            config.start_nonce_all + config.total_nonce_all,
+            config.total_nonce_all);
+        for (gpu, cfg) in &tasks {
+            println!("  GPU {}: start={}, count={}",
+                gpu, cfg.start_nonce, cfg.total_nonce);
+        }
     }
 
     if tasks.is_empty() {

@@ -297,11 +297,8 @@ async fn create_job(
     }
 
     let mut config = SearchConfig::with_outpoint(outpoint.clone());
-    println!("Initial config: start_nonce_all = {}", config.start_nonce_all);
     if let Some(opts) = payload.options {
-        println!("Applying options: {:?}", opts);
         apply_options(&mut config, opts)?;
-        println!("After apply_options: start_nonce_all = {}", config.start_nonce_all);
     }
     let wait = payload.wait.unwrap_or(false);
 
@@ -423,45 +420,66 @@ fn system_time_to_secs(t: SystemTime) -> u64 {
 }
 
 fn apply_options(config: &mut SearchConfig, opts: SearchOptions) -> Result<(), ApiError> {
+    // 记录接收到的参数
+    let mut applied = Vec::new();
+
     if let Some(v) = opts.total_nonce {
         config.total_nonce_all = v;
+        applied.push(format!("total_nonce={}", v));
     }
     if let Some(v) = opts.start_nonce {
-        println!("Setting start_nonce_all to: {}", v);
         config.start_nonce_all = v;
+        applied.push(format!("start_nonce={}", v));
     }
     if let Some(v) = opts.batch_size {
         config.batch_size = v;
+        applied.push(format!("batch_size={}", v));
     }
     if let Some(v) = opts.threads_per_block {
         config.threads_per_block = v;
+        applied.push(format!("threads={}", v));
     }
     if let Some(v) = opts.blocks {
         config.blocks = v;
+        applied.push(format!("blocks={}", v));
     }
     if let Some(v) = opts.binary_nonce {
         config.binary_nonce = v;
+        applied.push(format!("binary_nonce={}", v));
     }
     if let Some(v) = opts.persistent {
         config.persistent = v;
+        applied.push(format!("persistent={}", v));
     }
     if let Some(v) = opts.chunk_size {
         config.chunk_size = v;
+        applied.push(format!("chunk_size={}", v));
     }
     if let Some(v) = opts.ilp {
         config.ilp = v.clamp(1, MAX_ILP);
+        applied.push(format!("ilp={}", config.ilp));
     }
     if let Some(v) = opts.progress_ms {
         config.progress_ms = v;
+        applied.push(format!("progress_ms={}", v));
     }
     if let Some(v) = opts.odometer {
         config.odometer = v;
+        applied.push(format!("odometer={}", v));
     }
     if let Some(ids) = opts.gpu_ids {
-        config.gpu_ids = Some(ids);
+        config.gpu_ids = Some(ids.clone());
+        applied.push(format!("gpu_ids={:?}", ids));
     }
     if let Some(ws) = opts.gpu_weights {
-        config.gpu_weights = Some(ws);
+        config.gpu_weights = Some(ws.clone());
+        applied.push(format!("gpu_weights={:?}", ws));
     }
+
+    // 输出所有接收到的参数
+    if !applied.is_empty() {
+        println!("[Config] {}", applied.join(", "));
+    }
+
     Ok(())
 }

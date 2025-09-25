@@ -320,9 +320,6 @@ void double_sha256_max_kernel(const uint8_t* __restrict__ base_message, size_t b
 
     for(uint64_t i = tid; i < total_nonce; i += stride){
         uint64_t nonce = start_nonce + i;
-        if(i == 0 && blockIdx.x == 0 && threadIdx.x == 0) {
-            printf("CUDA: First nonce = %llu (start_nonce=%llu + i=%llu)\n", nonce, start_nonce, i);
-        }
 
         // 从 midstate 出发，仅压缩尾部（base 剩余 + nonce + padding），最多2块
         uint32_t H1[8];
