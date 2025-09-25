@@ -94,7 +94,8 @@ for a in "${ARCH_LIST[@]}"; do
   PTX_TRY+=("${c/compute_/}")
 done
 # add common fallbacks (highest -> lowest)
-PTX_TRY+=(120 110 100 90 89 86 80 75 70 61 60 52)
+# 100 = Blackwell (RTX 5090), 90 = Hopper, 89 = Ada (RTX 4090)
+PTX_TRY+=(120 110 100 95 90 89 86 80 75 70 61 60 52)
 
 # de-dup while preserving order
 declare -A seen

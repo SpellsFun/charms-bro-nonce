@@ -3,7 +3,9 @@
 ARG CUDA_VERSION=12.5.1
 ARG UBUNTU_VERSION=22.04
 ARG RUST_VERSION=1.78.0
-ARG CUDA_ARCHES="sm_89"
+# 支持多架构：sm_89 (RTX 4090), sm_90 (H100), sm_100 (RTX 5090 Blackwell)
+# 留空则自动检测
+ARG CUDA_ARCHES=""
 
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS builder
 
@@ -35,11 +37,19 @@ COPY src ./src
 COPY build_cubin_ada.sh sha256_kernel.cu ./
 
 RUN chmod +x build_cubin_ada.sh && \
-    ARCHES="${CUDA_ARCHES}"./build_cubin_ada.sh && \
+    if [ -n "${CUDA_ARCHES}" ]; then \
+        echo "[Docker] Building for specified architectures: ${CUDA_ARCHES}"; \
+        ARCHES="${CUDA_ARCHES}" ./build_cubin_ada.sh; \
+    else \
+        echo "[Docker] Auto-detecting GPU architectures"; \
+        ./build_cubin_ada.sh; \
+    fi && \
+    # 确保生成 PTX 作为通用后备
     if [ ! -f sha256_kernel.ptx ]; then \
-        FIRST_ARCH=$(echo "${CUDA_ARCHES}" | cut -d, -f1); \
-        COMPUTE_ARCH=$(echo "${FIRST_ARCH}" | sed 's/sm_/compute_/'); \
-        nvcc -O3 -ptx -arch=${COMPUTE_ARCH} sha256_kernel.cu -o sha256_kernel.ptx; \
+        echo "[Docker] Generating PTX for forward compatibility"; \
+        nvcc -O3 -ptx -arch=compute_90 sha256_kernel.cu -o sha256_kernel.ptx || \
+        nvcc -O3 -ptx -arch=compute_89 sha256_kernel.cu -o sha256_kernel.ptx || \
+        nvcc -O3 -ptx -arch=compute_80 sha256_kernel.cu -o sha256_kernel.ptx; \
     fi
 
 RUN cargo build --release --locked

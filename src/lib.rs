@@ -188,7 +188,9 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
     for &gpu in &gpu_indices {
         let dev = Device::get_device(gpu)?;
         let name = dev.name()?;
-        println!("  - GPU {}: {}", gpu, name);
+        let (major, minor) = dev.compute_capability();
+        let arch = format!("sm_{}{}", major, minor);
+        println!("  - GPU {}: {} ({})", gpu, name, arch);
     }
 
     if config.total_nonce_all == 0 {
