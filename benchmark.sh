@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # RTX 4090 自动化性能测试脚本
-# 用于测试和优化GPU挖矿性能
+# 编译、启动服务并运行性能测试
 
 set -e
 
@@ -16,18 +16,65 @@ SERVER_URL="http://localhost:8001"
 OUTPOINT="8a4b24e948315a338ad421a1d01e14260b7e697291f1fb0c44e64829a7fa80cd:1"
 TOTAL_NONCE=10000000000  # 10B for quick test
 
+# 环境变量
+export CUDA_CACHE_MAXSIZE=4294967296
+export CUDA_FORCE_PTX_JIT=1
+
 echo -e "${GREEN}=== RTX 4090 性能基准测试 ===${NC}"
 echo ""
 
+# 编译项目
+compile_project() {
+    echo -e "${YELLOW}编译项目...${NC}"
+
+    # 编译CUDA内核
+    if [ -f "build_cubin_ada.sh" ]; then
+        echo "  编译CUDA内核..."
+        ARCH=sm_89 RREG=128 ./build_cubin_ada.sh || true
+    fi
+
+    # 编译Rust
+    echo "  编译Rust代码..."
+    cargo build --release
+
+    echo -e "${GREEN}编译完成${NC}"
+}
+
+# 启动服务
+start_server() {
+    echo -e "${YELLOW}启动服务...${NC}"
+
+    # 停止旧服务
+    pkill -f "target/release/bro" || true
+    sleep 1
+
+    # 后台启动服务
+    nohup cargo run --release > server.log 2>&1 &
+    local pid=$!
+
+    # 等待服务启动
+    echo -n "等待服务启动"
+    for i in {1..10}; do
+        sleep 1
+        echo -n "."
+        if curl -s "${SERVER_URL}/api/v1/jobs" > /dev/null 2>&1; then
+            echo -e " ${GREEN}成功${NC}"
+            echo "服务PID: $pid"
+            return 0
+        fi
+    done
+
+    echo -e " ${RED}失败${NC}"
+    echo "服务日志:"
+    tail -n 20 server.log
+    return 1
+}
+
 # 检查服务是否运行
 check_server() {
-    echo -n "检查服务器状态... "
     if curl -s "${SERVER_URL}/api/v1/jobs" > /dev/null 2>&1; then
-        echo -e "${GREEN}运行中${NC}"
         return 0
     else
-        echo -e "${RED}未运行${NC}"
-        echo "请先运行: cargo run --release"
         return 1
     fi
 }
@@ -74,23 +121,35 @@ run_test() {
     return 0
 }
 
-# 编译优化内核
-compile_kernel() {
-    echo -e "${YELLOW}编译CUDA内核...${NC}"
-    if [ -f "build_cubin_ada.sh" ]; then
-        ARCH=sm_89 RREG=128 ./build_cubin_ada.sh > /dev/null 2>&1
-        echo -e "${GREEN}编译完成${NC}"
-    else
-        echo -e "${YELLOW}跳过编译（build脚本不存在）${NC}"
-    fi
+# 停止服务
+stop_server() {
+    echo -e "${YELLOW}停止服务...${NC}"
+    pkill -f "target/release/bro" || true
+    sleep 1
+    echo -e "${GREEN}服务已停止${NC}"
 }
 
 # 主测试流程
 main() {
-    # 检查服务器
-    if ! check_server; then
-        exit 1
-    fi
+    # 根据参数执行不同操作
+    case "${1:-test}" in
+        compile)
+            compile_project
+            ;;
+        start)
+            compile_project
+            start_server
+            ;;
+        stop)
+            stop_server
+            ;;
+        test)
+            # 检查服务是否运行，如果没有则编译并启动
+            if ! check_server; then
+                echo -e "${YELLOW}服务未运行，正在启动...${NC}"
+                compile_project
+                start_server || exit 1
+            fi
 
     # 初始化结果文件
     echo "Test,GH/s,Best_LZ,Duration" > benchmark_results.csv
@@ -151,32 +210,47 @@ main() {
 
     echo -e "\n${GREEN}测试完成！${NC}"
     echo "详细结果保存在: benchmark_results.csv"
+            ;;
+        quick)
+            # 快速测试
+            if ! check_server; then
+                compile_project
+                start_server || exit 1
+            fi
+            run_test "快速测试" '{
+                "total_nonce": 1000000000,
+                "threads_per_block": 256,
+                "blocks": 4096,
+                "ilp": 16,
+                "persistent": true,
+                "chunk_size": 262144,
+                "binary_nonce": true
+            }'
+            ;;
+        custom)
+            # 自定义测试
+            if [ -z "$2" ]; then
+                echo "用法: $0 custom '{\"total_nonce\": 1000000000, ...}'"
+                exit 1
+            fi
+            if ! check_server; then
+                compile_project
+                start_server || exit 1
+            fi
+            run_test "自定义测试" "$2"
+            ;;
+        *)
+            echo "用法: $0 [compile|start|stop|test|quick|custom]"
+            echo "  compile - 编译项目"
+            echo "  start   - 编译并启动服务"
+            echo "  stop    - 停止服务"
+            echo "  test    - 运行完整测试（默认）"
+            echo "  quick   - 运行快速测试"
+            echo "  custom  - 运行自定义配置测试"
+            exit 1
+            ;;
+    esac
 }
 
-# 如果提供了参数，运行特定测试
-if [ "$1" == "compile" ]; then
-    compile_kernel
-    exit 0
-elif [ "$1" == "quick" ]; then
-    # 快速测试
-    check_server && run_test "快速测试" '{
-        "total_nonce": 1000000000,
-        "threads_per_block": 256,
-        "blocks": 4096,
-        "ilp": 16,
-        "persistent": true,
-        "chunk_size": 262144,
-        "binary_nonce": true
-    }'
-    exit 0
-elif [ "$1" == "custom" ]; then
-    # 自定义测试
-    if [ -z "$2" ]; then
-        echo "用法: $0 custom '{\"total_nonce\": 1000000000, ...}'"
-        exit 1
-    fi
-    check_server && run_test "自定义测试" "$2"
-    exit 0
-else
-    main
-fi
+# 运行主流程
+main "$@"
