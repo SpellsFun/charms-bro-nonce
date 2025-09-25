@@ -51,7 +51,7 @@ struct CreateJobRequest {
     wait: Option<bool>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, Debug)]
 struct SearchOptions {
     total_nonce: Option<u64>,
     start_nonce: Option<u64>,
@@ -297,8 +297,11 @@ async fn create_job(
     }
 
     let mut config = SearchConfig::with_outpoint(outpoint.clone());
+    println!("Initial config: start_nonce_all = {}", config.start_nonce_all);
     if let Some(opts) = payload.options {
+        println!("Applying options: {:?}", opts);
         apply_options(&mut config, opts)?;
+        println!("After apply_options: start_nonce_all = {}", config.start_nonce_all);
     }
     let wait = payload.wait.unwrap_or(false);
 
@@ -424,6 +427,7 @@ fn apply_options(config: &mut SearchConfig, opts: SearchOptions) -> Result<(), A
         config.total_nonce_all = v;
     }
     if let Some(v) = opts.start_nonce {
+        println!("Setting start_nonce_all to: {}", v);
         config.start_nonce_all = v;
     }
     if let Some(v) = opts.batch_size {

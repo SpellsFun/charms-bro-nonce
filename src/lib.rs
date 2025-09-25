@@ -211,6 +211,7 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
         if len == 0 {
             continue;
         }
+        println!("GPU {}: start_nonce = {} (base: {} + offset: {})", gpu, start, config.start_nonce_all, start_off);
         let gpu_cfg = GpuConfig {
             start_nonce: start,
             total_nonce: len,
