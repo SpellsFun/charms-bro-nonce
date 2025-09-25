@@ -13,8 +13,8 @@ NC='\033[0m' # No Color
 
 # 配置
 SERVER_URL="http://localhost:8001"
-OUTPOINT="8a4b24e948315a338ad421a1d01e14260b7e697291f1fb0c44e64829a7fa80cd:1"
-TOTAL_NONCE=10000000000  # 10B for quick test
+BASE_OUTPOINT="8a4b24e948315a338ad421a1d01e14260b7e697291f1fb0c44e64829a7fa80cd"
+TOTAL_NONCE=100000000000  # 100B for better test
 
 # 环境变量
 export CUDA_CACHE_MAXSIZE=4294967296
@@ -84,6 +84,10 @@ run_test() {
     local name=$1
     local config=$2
 
+    # 使用唯一的outpoint避免缓存
+    local timestamp=$(date +%s%N)
+    local outpoint="${BASE_OUTPOINT}:${timestamp}"
+
     echo -e "\n${YELLOW}测试: $name${NC}"
     echo "配置: $config"
     echo -n "运行中... "
@@ -93,7 +97,7 @@ run_test() {
     local response=$(curl -s -X POST "${SERVER_URL}/api/v1/jobs" \
         -H 'Content-Type: application/json' \
         -d "{
-            \"outpoint\": \"${OUTPOINT}\",
+            \"outpoint\": \"${outpoint}\",
             \"wait\": true,
             \"options\": ${config}
         }")
@@ -156,14 +160,14 @@ main() {
 
     # 测试1: 默认配置
     run_test "默认配置" '{
-        "total_nonce": 10000000000,
+        "total_nonce": 100000000000,
         "persistent": true,
         "progress_ms": 1000
     }'
 
     # 测试2: 优化配置 - 二进制模式
     run_test "优化-二进制" '{
-        "total_nonce": 10000000000,
+        "total_nonce": 100000000000,
         "threads_per_block": 512,
         "blocks": 1024,
         "ilp": 8,
@@ -175,7 +179,7 @@ main() {
 
     # 测试3: 优化配置 - ASCII模式
     run_test "优化-ASCII" '{
-        "total_nonce": 10000000000,
+        "total_nonce": 100000000000,
         "threads_per_block": 512,
         "blocks": 1024,
         "ilp": 8,
@@ -188,7 +192,7 @@ main() {
 
     # 测试4: 极限配置
     run_test "极限配置" '{
-        "total_nonce": 10000000000,
+        "total_nonce": 100000000000,
         "threads_per_block": 256,
         "blocks": 2048,
         "ilp": 16,
