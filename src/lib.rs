@@ -1,4 +1,5 @@
 use rustacuda::context::CacheConfig;
+use rustacuda::device::DeviceAttribute;
 use rustacuda::launch;
 use rustacuda::memory::*;
 use rustacuda::prelude::*;
@@ -188,7 +189,9 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
     for &gpu in &gpu_indices {
         let dev = Device::get_device(gpu)?;
         let name = dev.name()?;
-        let (major, minor) = dev.compute_capability();
+        // 获取计算能力
+        let major = dev.get_attribute(DeviceAttribute::ComputeCapabilityMajor)? as u32;
+        let minor = dev.get_attribute(DeviceAttribute::ComputeCapabilityMinor)? as u32;
         let arch = format!("sm_{}{}", major, minor);
         println!("  - GPU {}: {} ({})", gpu, name, arch);
     }
