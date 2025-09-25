@@ -164,11 +164,11 @@ main() {
     # 测试2: 优化配置 - 二进制模式
     run_test "优化-二进制" '{
         "total_nonce": 10000000000,
-        "threads_per_block": 256,
-        "blocks": 4096,
-        "ilp": 16,
+        "threads_per_block": 512,
+        "blocks": 1024,
+        "ilp": 8,
         "persistent": true,
-        "chunk_size": 262144,
+        "chunk_size": 131072,
         "binary_nonce": true,
         "progress_ms": 1000
     }'
@@ -176,11 +176,11 @@ main() {
     # 测试3: 优化配置 - ASCII模式
     run_test "优化-ASCII" '{
         "total_nonce": 10000000000,
-        "threads_per_block": 256,
-        "blocks": 4096,
-        "ilp": 16,
+        "threads_per_block": 512,
+        "blocks": 1024,
+        "ilp": 8,
         "persistent": true,
-        "chunk_size": 262144,
+        "chunk_size": 131072,
         "binary_nonce": false,
         "odometer": true,
         "progress_ms": 1000
@@ -189,11 +189,11 @@ main() {
     # 测试4: 极限配置
     run_test "极限配置" '{
         "total_nonce": 10000000000,
-        "threads_per_block": 128,
-        "blocks": 8192,
-        "ilp": 32,
+        "threads_per_block": 256,
+        "blocks": 2048,
+        "ilp": 16,
         "persistent": true,
-        "chunk_size": 524288,
+        "chunk_size": 262144,
         "binary_nonce": true,
         "progress_ms": 1000
     }'
@@ -219,9 +219,9 @@ main() {
             fi
             run_test "快速测试" '{
                 "total_nonce": 1000000000,
-                "threads_per_block": 256,
-                "blocks": 4096,
-                "ilp": 16,
+                "threads_per_block": 512,
+                "blocks": 1024,
+                "ilp": 8,
                 "persistent": true,
                 "chunk_size": 262144,
                 "binary_nonce": true
