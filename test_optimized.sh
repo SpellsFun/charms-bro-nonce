@@ -18,7 +18,8 @@ cp sha256_kernel.cubin sha256_kernel_original.cubin
 # 2. 编译优化版本
 echo -e "\n${YELLOW}步骤2: 编译优化内核${NC}"
 
-# 先尝试编译优化版本V2
+# 先尝试编译优化最终版本
+echo "编译优化的最终版本..."
 nvcc -O3 \
   -arch=sm_89 \
   -maxrregcount=64 \
@@ -26,7 +27,7 @@ nvcc -O3 \
   -Xptxas -O3,-v \
   -Xptxas -dlcm=ca \
   -Xcompiler -O3 \
-  -cubin sha256_kernel_optimized_v2.cu -o sha256_kernel_optimized.cubin
+  -cubin sha256_kernel_optimized_final.cu -o sha256_kernel_optimized.cubin
 
 if [ $? -ne 0 ]; then
     echo -e "${RED}优化版本编译失败，使用修复版本${NC}"
