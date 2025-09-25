@@ -34,7 +34,7 @@ __device__ __forceinline__ uint32_t rotr(uint32_t x, int n) {
     return __funnelshift_r(x, x, n);
 }
 
-__device__ void sha256_compress_block(const uint8_t block[64], uint32_t H[8]) {
+__device__ __noinline__ void sha256_compress_block(const uint8_t block[64], uint32_t H[8]) {
     // Rolling W[16] schedule to reduce register/local memory pressure
     uint32_t W[16];
     #pragma unroll
@@ -133,11 +133,14 @@ __device__ void sha256_32B_from_words(const uint32_t in[8], uint32_t out_words[8
 }
 
 __device__ __forceinline__ uint32_t count_leading_zeros_words(const uint32_t* w){
+    // SHA256 outputs are already in big-endian format (most significant byte first)
+    // We need to count leading zeros starting from the most significant bit
     uint32_t cnt=0;
     #pragma unroll
     for(int i=0;i<8;i++){
-        uint32_t v = w[i];
+        uint32_t v = w[i];  // This is already big-endian from SHA256
         if(v==0u){ cnt+=32; continue; }
+        // __clz counts leading zeros from MSB, which is what we want
         cnt += __clz(v);
         break;
     }
@@ -145,7 +148,7 @@ __device__ __forceinline__ uint32_t count_leading_zeros_words(const uint32_t* w)
 }
 
 // Compress a single 512-bit block given as 16 big-endian 32-bit words
-__device__ void sha256_compress_words(const uint32_t W0[16], uint32_t H[8]){
+__device__ __forceinline__ void sha256_compress_words(const uint32_t W0[16], uint32_t H[8]){
     uint32_t W[16];
     #pragma unroll
     for(int i=0;i<16;i++) W[i] = W0[i];
@@ -301,7 +304,7 @@ __device__ __forceinline__ void warp_reduce_max(uint32_t &lz, uint64_t &nonce){
 }
 
 // Kernel: 每 block 找局部最大，返回 block 结果
-extern "C" __global__ __launch_bounds__(512, 1)
+extern "C" __global__ __launch_bounds__(256, 2)
 void double_sha256_max_kernel(const uint8_t* __restrict__ base_message, size_t base_len,
     uint64_t start_nonce, uint64_t total_nonce, uint32_t binary_nonce,
     uint64_t* block_best_nonce, uint32_t* block_best_lz)
@@ -470,7 +473,7 @@ void double_sha256_max_kernel(const uint8_t* __restrict__ base_message, size_t b
 }
 
 // Persistent kernel: fetch work via global atomic counter
-extern "C" __global__ __launch_bounds__(512, 1)
+extern "C" __global__ __launch_bounds__(256, 2)
 void double_sha256_persistent_kernel(const uint8_t* __restrict__ base_message, size_t base_len,
     uint64_t start_nonce, uint64_t total_nonce, uint32_t binary_nonce,
     unsigned long long* next_index, // global atomic counter
@@ -537,8 +540,8 @@ void double_sha256_persistent_kernel(const uint8_t* __restrict__ base_message, s
             const uint32_t max_iter = iters_per_thread;
             bool reached_end = false;
 
-            #pragma unroll 8
-            for(uint32_t iter = 0; iter < 8; ++iter){
+            #pragma unroll 16
+            for(uint32_t iter = 0; iter < 16; ++iter){
                 if(iter >= max_iter) break;
                 unsigned long long idx = seg + (unsigned long long)iter;
                 if(idx >= block_end){ reached_end = true; break; }
@@ -681,7 +684,7 @@ void double_sha256_persistent_kernel(const uint8_t* __restrict__ base_message, s
 }
 
 // ASCII-only persistent kernel (no binary branches), using odometer and fast itoa
-extern "C" __global__ __launch_bounds__(512, 1)
+extern "C" __global__ __launch_bounds__(256, 2)
 void double_sha256_persistent_kernel_ascii(const uint8_t* __restrict__ base_message, size_t base_len,
     uint64_t start_nonce, uint64_t total_nonce, uint32_t /*binary_nonce_dummy*/,
     unsigned long long* next_index, uint32_t chunk_size, uint32_t iters_per_thread,
@@ -745,8 +748,8 @@ void double_sha256_persistent_kernel_ascii(const uint8_t* __restrict__ base_mess
             const uint32_t max_iter = iters_per_thread;
             bool reached_end = false;
 
-            #pragma unroll 8
-            for(uint32_t iter = 0; iter < 8; ++iter){
+            #pragma unroll 16
+            for(uint32_t iter = 0; iter < 16; ++iter){
                 if(iter >= max_iter) break;
                 unsigned long long idx = seg + (unsigned long long)iter;
                 if(idx >= block_end){ reached_end = true; break; }

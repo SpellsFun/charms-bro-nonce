@@ -5,3 +5,19 @@
 /target
 /tmp
 /charms-bro-nonce/target/
+
+# CUDA binaries
+*.cubin
+*.ptx
+*.fatbin
+
+# Test and benchmark files
+*.js
+benchmark_results.csv
+remote_benchmark_results.csv
+*.log
+
+# Temporary files
+*.swp
+*.swo
+*~

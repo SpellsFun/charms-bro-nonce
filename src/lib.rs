@@ -88,11 +88,11 @@ impl SearchConfig {
 
 pub const DEFAULT_TOTAL_NONCE: u64 = 100_000_000_000_000;
 pub const DEFAULT_START_NONCE: u64 = 0;
-pub const DEFAULT_BATCH_SIZE: u64 = 10_000_000_000;
-pub const DEFAULT_THREADS_PER_BLOCK: u32 = 512;
-pub const DEFAULT_BLOCKS: u32 = 2048;
-pub const DEFAULT_CHUNK_SIZE: u32 = 131_072;
-pub const DEFAULT_ILP: u32 = 8;
+pub const DEFAULT_BATCH_SIZE: u64 = 50_000_000_000;
+pub const DEFAULT_THREADS_PER_BLOCK: u32 = 256;
+pub const DEFAULT_BLOCKS: u32 = 4096;
+pub const DEFAULT_CHUNK_SIZE: u32 = 262_144;
+pub const DEFAULT_ILP: u32 = 16;
 pub const MAX_ILP: u32 = 8;
 pub const DEFAULT_PROGRESS_MS: u64 = 0;
 pub const DEFAULT_ODOMETER: bool = true;
@@ -447,8 +447,8 @@ fn run_on_device(
         None
     };
 
-    let _ = func.set_cache_config(CacheConfig::PreferShared);
-    let _ = persistent_func.set_cache_config(CacheConfig::PreferShared);
+    let _ = func.set_cache_config(CacheConfig::PreferL1);
+    let _ = persistent_func.set_cache_config(CacheConfig::PreferL1);
 
     let mut d_base = DeviceBuffer::from_slice(fixed)?;
     let mut d_block_lz = unsafe { DeviceBuffer::<u32>::zeroed(cfg.blocks as usize)? };
