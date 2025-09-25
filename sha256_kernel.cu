@@ -304,7 +304,7 @@ __device__ __forceinline__ void warp_reduce_max(uint32_t &lz, uint64_t &nonce){
 }
 
 // Kernel: 每 block 找局部最大，返回 block 结果
-extern "C" __global__ __launch_bounds__(256, 4)
+extern "C" __global__ __launch_bounds__(256, 2)
 void double_sha256_max_kernel(const uint8_t* __restrict__ base_message, size_t base_len,
     uint64_t start_nonce, uint64_t total_nonce, uint32_t binary_nonce,
     uint64_t* block_best_nonce, uint32_t* block_best_lz)
@@ -473,7 +473,7 @@ void double_sha256_max_kernel(const uint8_t* __restrict__ base_message, size_t b
 }
 
 // Persistent kernel: fetch work via global atomic counter
-extern "C" __global__ __launch_bounds__(256, 4)
+extern "C" __global__ __launch_bounds__(256, 2)
 void double_sha256_persistent_kernel(const uint8_t* __restrict__ base_message, size_t base_len,
     uint64_t start_nonce, uint64_t total_nonce, uint32_t binary_nonce,
     unsigned long long* next_index, // global atomic counter
@@ -684,7 +684,7 @@ void double_sha256_persistent_kernel(const uint8_t* __restrict__ base_message, s
 }
 
 // ASCII-only persistent kernel (no binary branches), using odometer and fast itoa
-extern "C" __global__ __launch_bounds__(256, 4)
+extern "C" __global__ __launch_bounds__(256, 2)
 void double_sha256_persistent_kernel_ascii(const uint8_t* __restrict__ base_message, size_t base_len,
     uint64_t start_nonce, uint64_t total_nonce, uint32_t /*binary_nonce_dummy*/,
     unsigned long long* next_index, uint32_t chunk_size, uint32_t iters_per_thread,

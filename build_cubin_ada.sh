@@ -10,7 +10,7 @@ set -euo pipefail
 
 ARCH=${ARCH:-}
 ARCHES=${ARCHES:-}
-RREG=${RREG:-256}
+RREG=${RREG:-64}
 OUT=${OUT:-sha256_kernel.cubin}
 
 to_sm() {
@@ -66,7 +66,7 @@ if [[ ${#ARCH_LIST[@]} -eq 0 ]]; then
 fi
 
 # Compose NVCC flags
-NVCC_FLAGS=( -O3 -Xptxas -O3,-v -Xptxas -dlcm=cg -use_fast_math -ftz=true -prec-div=false -prec-sqrt=false -Xcompiler -O3 )
+NVCC_FLAGS=( -O3 -Xptxas -O3,-v -Xptxas -dlcm=ca )
 for a in "${ARCH_LIST[@]}"; do
   SM=$(to_sm "$a")
   COMPUTE=$(to_compute "$a")
