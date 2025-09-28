@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use axum::extract::{ConnectInfo, Path, State};
@@ -20,6 +22,7 @@ struct AppState {
     jobs: Arc<RwLock<HashMap<String, Job>>>,
     concurrency: Arc<Semaphore>,
     auth_token: Option<String>,
+    log_file: Option<Arc<Mutex<File>>>,
 }
 
 struct Job {
@@ -273,18 +276,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(8001u16);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
+    // 初始化日志文件（默认使用./bro-api.log）
+    let log_path = std::env::var("LOG_FILE").unwrap_or_else(|_| "./bro-api.log".to_string());
+    let log_file = match OpenOptions::new().create(true).append(true).open(&log_path) {
+        Ok(file) => {
+            println!("Logging to file: {}", log_path);
+            Some(Arc::new(Mutex::new(file)))
+        }
+        Err(e) => {
+            eprintln!("Failed to open log file {}: {}", log_path, e);
+            None
+        }
+    };
+
+    // 启动日志
+    log_print(
+        log_file.as_ref(),
+        &format!("========== Starting bro API server =========="),
+    );
+    log_print(
+        log_file.as_ref(),
+        &format!("Time: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S")),
+    );
+
     // 从环境变量获取认证token
     let auth_token = std::env::var("AUTH_TOKEN").ok();
     if let Some(ref token) = auth_token {
-        println!("API authentication enabled with token: {}...", &token[..token.len().min(8)]);
+        log_print(
+            log_file.as_ref(),
+            &format!("API authentication enabled with token: {}...", &token[..token.len().min(8)]),
+        );
     } else {
-        println!("WARNING: API authentication disabled (no AUTH_TOKEN set)");
+        log_print(
+            log_file.as_ref(),
+            "WARNING: API authentication disabled (no AUTH_TOKEN set)",
+        );
     }
 
     let state = AppState {
         jobs: Arc::new(RwLock::new(HashMap::new())),
         concurrency: Arc::new(Semaphore::new(1)),
         auth_token,
+        log_file: log_file.clone(),
     };
 
     let app = Router::new()
@@ -296,7 +329,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .with_state(state.clone());
 
-    println!("bro API server listening on {}", addr);
+    log_print(
+        log_file.as_ref(),
+        &format!("Server listening on {}", addr),
+    );
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(
         listener,
@@ -314,11 +350,14 @@ async fn create_job(
     let outpoint = payload.outpoint.trim().to_string();
 
     // 记录请求日志
-    println!(
-        "[Request] IP: {}, Outpoint: {}, Wait: {}",
-        addr.ip(),
-        outpoint,
-        payload.wait.unwrap_or(false)
+    log_print(
+        state.log_file.as_ref(),
+        &format!(
+            "[Request] IP: {}, Outpoint: {}, Wait: {}",
+            addr.ip(),
+            outpoint,
+            payload.wait.unwrap_or(false)
+        ),
     );
 
     if outpoint.is_empty() {
@@ -349,7 +388,10 @@ async fn get_job(
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<JobResponse>), ApiError> {
     // 记录请求日志
-    println!("[Request] IP: {}, Get Job: {}", addr.ip(), id);
+    log_print(
+        state.log_file.as_ref(),
+        &format!("[Request] IP: {}, Get Job: {}", addr.ip(), id),
+    );
     if let Some(resp) = {
         let jobs = state.jobs.read().await;
         jobs.get(&id).map(|job| job.to_response(&id))
@@ -376,7 +418,10 @@ async fn list_jobs(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<JobResponse>>, ApiError> {
     // 记录请求日志
-    println!("[Request] IP: {}, List Jobs", addr.ip());
+    log_print(
+        state.log_file.as_ref(),
+        &format!("[Request] IP: {}, List Jobs", addr.ip()),
+    );
     let jobs = state.jobs.read().await;
     let mut entries: Vec<JobResponse> = jobs.iter().map(|(id, job)| job.to_response(id)).collect();
     entries.sort_by_key(|resp| resp.submitted_at);
@@ -518,17 +563,33 @@ async fn auth_middleware(
                 format!("Unknown path: {}", path)
             };
 
-            println!(
-                "[Auth Failed] IP: {}, Path: {}, {}",
-                addr.ip(),
-                path,
-                outpoint_info
+            log_print(
+                state.log_file.as_ref(),
+                &format!(
+                    "[Auth Failed] IP: {}, Path: {}, {}",
+                    addr.ip(),
+                    path,
+                    outpoint_info
+                ),
             );
             return Err(StatusCode::UNAUTHORIZED);
         }
     }
 
     Ok(next.run(request).await)
+}
+
+// 日志输出函数，同时输出到控制台和文件
+fn log_print(log_file: Option<&Arc<Mutex<File>>>, message: &str) {
+    println!("{}", message);
+
+    if let Some(file) = log_file {
+        if let Ok(mut f) = file.lock() {
+            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+            let _ = writeln!(f, "[{}] {}", timestamp, message);
+            let _ = f.flush();
+        }
+    }
 }
 
 fn apply_options(config: &mut SearchConfig, opts: SearchOptions) -> Result<(), ApiError> {
@@ -590,6 +651,7 @@ fn apply_options(config: &mut SearchConfig, opts: SearchOptions) -> Result<(), A
 
     // 输出所有接收到的参数
     if !applied.is_empty() {
+        // 注意：这里没有state可用，所以只能输出到控制台
         println!("[Config] {}", applied.join(", "));
     }
 
