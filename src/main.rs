@@ -397,12 +397,63 @@ async fn create_job(
     }
     let wait = payload.wait.unwrap_or(false);
 
-    if let Some(existing) = {
+    // 检查是否已有相同outpoint的任务
+    {
         let jobs = state.jobs.read().await;
-        jobs.get(&outpoint)
-            .map(|job| job.to_create_response(&outpoint))
-    } {
-        return Ok((StatusCode::OK, Json(existing)));
+        if let Some(existing_job) = jobs.get(&outpoint) {
+            // 如果任务正在运行或已完成，直接返回现有任务信息
+            match &existing_job.status {
+                JobStatus::Running { .. } => {
+                    log_print(
+                        state.log_file.as_ref(),
+                        &format!(
+                            "[Duplicate] IP: {} tried to submit outpoint: {} (already running)",
+                            addr.ip(),
+                            outpoint
+                        ),
+                    );
+                    return Ok((StatusCode::OK, Json(existing_job.to_create_response(&outpoint))));
+                }
+                JobStatus::Completed { .. } => {
+                    log_print(
+                        state.log_file.as_ref(),
+                        &format!(
+                            "[Duplicate] IP: {} tried to submit outpoint: {} (already completed)",
+                            addr.ip(),
+                            outpoint
+                        ),
+                    );
+                    return Ok((StatusCode::OK, Json(existing_job.to_create_response(&outpoint))));
+                }
+                JobStatus::Pending => {
+                    // 如果是Pending状态，可能是之前失败的任务，继续检查
+                    log_print(
+                        state.log_file.as_ref(),
+                        &format!(
+                            "[Info] Reusing pending job for outpoint: {}",
+                            outpoint
+                        ),
+                    );
+                    return Ok((StatusCode::OK, Json(existing_job.to_create_response(&outpoint))));
+                }
+                JobStatus::Failed { .. } => {
+                    // 如果之前失败了，允许重试，但先删除旧记录
+                    log_print(
+                        state.log_file.as_ref(),
+                        &format!(
+                            "[Retry] Retrying failed job for outpoint: {}",
+                            outpoint
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    // 移除失败的任务记录（如果存在）
+    {
+        let mut jobs = state.jobs.write().await;
+        jobs.remove(&outpoint);
     }
 
     let (status, response) = submit_job(&state, outpoint, config, wait).await?;
@@ -459,25 +510,17 @@ async fn get_job(
             &format!("[Request] IP: {}, Get Job: {}", addr.ip(), id),
         );
     }
-    if let Some(resp) = {
-        let jobs = state.jobs.read().await;
-        jobs.get(&id).map(|job| job.to_response(&id))
-    } {
-        return Ok((StatusCode::OK, Json(resp)));
-    }
-
-    let (status, _) = submit_job(
-        &state,
-        id.clone(),
-        SearchConfig::with_outpoint(id.clone()),
-        false,
-    )
-    .await?;
+    // 只查询，不创建新任务
     let jobs = state.jobs.read().await;
-    let job = jobs
-        .get(&id)
-        .ok_or_else(|| ApiError::internal("job missing after submission"))?;
-    Ok((status, Json(job.to_response(&id))))
+    if let Some(job) = jobs.get(&id) {
+        Ok((StatusCode::OK, Json(job.to_response(&id))))
+    } else {
+        // 任务不存在，返回404
+        Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("Job not found: {}", id),
+        })
+    }
 }
 
 async fn list_jobs(
@@ -664,8 +707,19 @@ fn apply_options(config: &mut SearchConfig, opts: SearchOptions) -> Result<(), A
     let mut applied = Vec::new();
 
     if let Some(v) = opts.total_nonce {
-        config.total_nonce_all = v;
-        applied.push(format!("total_nonce={}", v));
+        // 限制total_nonce最大为2万亿
+        let limited_v = if v > bro::MAX_TOTAL_NONCE {
+            println!("[{}] [Warning] total_nonce {} exceeds max limit, capping to {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                v,
+                bro::MAX_TOTAL_NONCE
+            );
+            bro::MAX_TOTAL_NONCE
+        } else {
+            v
+        };
+        config.total_nonce_all = limited_v;
+        applied.push(format!("total_nonce={}", limited_v));
     }
     if let Some(v) = opts.start_nonce {
         config.start_nonce_all = v;

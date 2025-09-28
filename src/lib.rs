@@ -70,7 +70,7 @@ impl SearchConfig {
     pub fn with_outpoint(outpoint: String) -> Self {
         Self {
             outpoint,
-            total_nonce_all: DEFAULT_TOTAL_NONCE,
+            total_nonce_all: DEFAULT_TOTAL_NONCE.min(MAX_TOTAL_NONCE), // 应用最大限制
             start_nonce_all: DEFAULT_START_NONCE,
             batch_size: DEFAULT_BATCH_SIZE,
             threads_per_block: DEFAULT_THREADS_PER_BLOCK,
@@ -97,6 +97,7 @@ pub const DEFAULT_ILP: u32 = 1;
 pub const MAX_ILP: u32 = 8;
 pub const DEFAULT_PROGRESS_MS: u64 = 0;
 pub const DEFAULT_ODOMETER: bool = true;
+pub const MAX_TOTAL_NONCE: u64 = 2_000_000_000_000; // 2万亿的最大限制
 
 #[derive(Clone, Debug, Serialize)]
 pub struct SearchOutcome {
