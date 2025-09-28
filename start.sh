@@ -4,6 +4,7 @@
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # 配置文件
@@ -14,6 +15,9 @@ DEFAULT_PORT=8801
 # 从环境变量或使用默认值
 LOG_FILE="${LOG_FILE:-$DEFAULT_LOG_FILE}"
 PORT="${PORT:-$DEFAULT_PORT}"
+
+# 检查是否跳过编译（使用 SKIP_BUILD=1 ./start.sh 来跳过编译）
+SKIP_BUILD="${SKIP_BUILD:-0}"
 
 # 检查是否已在运行
 if [ -f "$PID_FILE" ]; then
@@ -38,15 +42,27 @@ if [ -z "$AUTH_TOKEN" ]; then
     fi
 fi
 
-# 检查二进制文件是否存在
+# 设置二进制文件路径
 BIN_PATH="./target/release/bro"
-if [ ! -f "$BIN_PATH" ]; then
-    echo -e "${YELLOW}Binary not found at $BIN_PATH, trying to build...${NC}"
+
+# 根据标志决定是否编译
+if [ "$SKIP_BUILD" = "1" ]; then
+    echo -e "${BLUE}Skipping compilation (SKIP_BUILD=1)${NC}"
+    if [ ! -f "$BIN_PATH" ]; then
+        echo -e "${RED}Binary not found at $BIN_PATH${NC}"
+        echo -e "${YELLOW}Please run without SKIP_BUILD first to compile${NC}"
+        exit 1
+    fi
+else
+    # 自动编译以确保使用最新代码
+    echo -e "${GREEN}Compiling latest code...${NC}"
+    echo -e "${YELLOW}(Use SKIP_BUILD=1 to skip compilation for faster restart)${NC}"
     cargo build --release
     if [ $? -ne 0 ]; then
         echo -e "${RED}Build failed!${NC}"
         exit 1
     fi
+    echo -e "${GREEN}Compilation successful${NC}"
 fi
 
 # 启动服务
