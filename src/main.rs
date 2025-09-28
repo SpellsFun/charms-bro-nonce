@@ -652,7 +652,9 @@ fn apply_options(config: &mut SearchConfig, opts: SearchOptions) -> Result<(), A
     // 输出所有接收到的参数
     if !applied.is_empty() {
         // 注意：这里没有state可用，所以只能输出到控制台
-        println!("[Config] {}", applied.join(", "));
+        println!("[{}] [Config] {}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            applied.join(", "));
     }
 
     Ok(())

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::thread;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
+use chrono::Local;
 
 static STOP: AtomicBool = AtomicBool::new(false);
 
@@ -181,14 +182,15 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
     };
 
     println!(
-        "Launching {} GPU worker(s): {:?}",
+        "[{}] Launching {} GPU worker(s): {:?}",
+        Local::now().format("%Y-%m-%d %H:%M:%S"),
         gpu_indices.len(),
         gpu_indices
     );
     for &gpu in &gpu_indices {
         let dev = Device::get_device(gpu)?;
         let name = dev.name()?;
-        println!("  - GPU {}: {}", gpu, name);
+        println!("[{}]   - GPU {}: {}", Local::now().format("%Y-%m-%d %H:%M:%S"), gpu, name);
     }
 
     if config.total_nonce_all == 0 {
@@ -229,12 +231,14 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
 
     // 输出GPU任务分配信息
     if !tasks.is_empty() {
-        println!("[Task] Range: {} to {}, Total: {} nonces",
+        println!("[{}] [Task] Range: {} to {}, Total: {} nonces",
+            Local::now().format("%Y-%m-%d %H:%M:%S"),
             config.start_nonce_all,
             config.start_nonce_all + config.total_nonce_all,
             config.total_nonce_all);
         for (gpu, cfg) in &tasks {
-            println!("  GPU {}: start={}, count={}",
+            println!("[{}]   GPU {}: start={}, count={}",
+                Local::now().format("%Y-%m-%d %H:%M:%S"),
                 gpu, cfg.start_nonce, cfg.total_nonce);
         }
     }
@@ -642,7 +646,8 @@ fn run_on_device(
                 // 只在找到更好结果时输出日志
                 if batch_lz > best_lz {
                     println!(
-                        "[GPU {}] Found better result! best_lz={} nonce={} at batch={}",
+                        "[{}] [GPU {}] Found better result! best_lz={} nonce={} at batch={}",
+                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
                         device_idx, batch_lz, batch_nonce_best, batch_idx
                     );
                     best_lz = batch_lz;
@@ -652,7 +657,8 @@ fn run_on_device(
                 // 完成时输出最终结果
                 if batch_idx + 1 == num_batches {
                     println!(
-                        "[GPU {}] Completed all batches. Final best_lz={} nonce={}",
+                        "[{}] [GPU {}] Completed all batches. Final best_lz={} nonce={}",
+                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
                         device_idx, best_lz, best_nonce
                     );
                 }
