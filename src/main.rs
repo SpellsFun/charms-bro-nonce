@@ -426,7 +426,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             {
                 let mut jobs = cleaner_state.jobs.write().await;
                 let before = jobs.len();
-                jobs.retain(|id, job| {
+                jobs.retain(|_id, job| {
                     match &job.status {
                         // 保留正在运行的任务
                         JobStatus::Running { .. } => true,
