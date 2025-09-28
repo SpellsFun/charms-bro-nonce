@@ -144,6 +144,10 @@ async fn submit_job(
     let submitted_at = SystemTime::now();
     {
         let mut jobs = state.jobs.write().await;
+        // 再次检查，避免并发问题
+        if jobs.contains_key(&job_id) {
+            return Err(ApiError::bad_request(format!("Job {} already exists", job_id)));
+        }
         jobs.insert(
             job_id.clone(),
             Job {
@@ -152,6 +156,12 @@ async fn submit_job(
             },
         );
     }
+
+    // 记录任务开始
+    log_print(
+        state.log_file.as_ref(),
+        &format!("[Job Started] Outpoint: {}", job_id),
+    );
 
     let runner_state = state.clone();
     if wait {
@@ -175,6 +185,13 @@ async fn submit_job(
         match result {
             Ok(Ok(outcome)) => {
                 outcome_opt = Some(outcome.clone());
+                log_print(
+                    runner_state.log_file.as_ref(),
+                    &format!(
+                        "[Job Completed] Outpoint: {}, best_lz: {}, best_nonce: {}",
+                        job_id, outcome.best_lz, outcome.best_nonce
+                    ),
+                );
                 let mut jobs = runner_state.jobs.write().await;
                 if let Some(job) = jobs.get_mut(&job_id) {
                     job.status = JobStatus::Completed {
@@ -188,6 +205,10 @@ async fn submit_job(
                 status = "failed".to_string();
                 error_opt = Some(err.to_string());
                 http_status = StatusCode::INTERNAL_SERVER_ERROR;
+                log_print(
+                    runner_state.log_file.as_ref(),
+                    &format!("[Job Failed] Outpoint: {}, Error: {}", job_id, err),
+                );
                 let mut jobs = runner_state.jobs.write().await;
                 if let Some(job) = jobs.get_mut(&job_id) {
                     job.status = JobStatus::Failed {
@@ -241,6 +262,13 @@ async fn submit_job(
         if let Some(job) = jobs.get_mut(&job_id_for_task) {
             match result {
                 Ok(Ok(outcome)) => {
+                    log_print(
+                        runner_state.log_file.as_ref(),
+                        &format!(
+                            "[Job Completed] Outpoint: {}, best_lz: {}, best_nonce: {}",
+                            job_id_for_task, outcome.best_lz, outcome.best_nonce
+                        ),
+                    );
                     job.status = JobStatus::Completed {
                         started_at,
                         finished_at,
@@ -248,6 +276,10 @@ async fn submit_job(
                     };
                 }
                 Ok(Err(err)) => {
+                    log_print(
+                        runner_state.log_file.as_ref(),
+                        &format!("[Job Failed] Outpoint: {}, Error: {}", job_id_for_task, err),
+                    );
                     job.status = JobStatus::Failed {
                         started_at: Some(started_at),
                         finished_at,
@@ -306,6 +338,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         log_file.as_ref(),
         &format!("Time: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S")),
     );
+    log_print(
+        log_file.as_ref(),
+        "Note: Job cache cleared on restart. Completed jobs may run again if resubmitted.",
+    );
 
     // 从环境变量获取认证token
     let auth_token = std::env::var("AUTH_TOKEN").ok();
@@ -343,20 +379,85 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &format!("Server listening on {}", addr),
     );
 
-    // 启动清理任务，定期清理过期的轮询记录
+    // 启动清理任务，定期清理过期的记录
     let cleaner_state = state.clone();
+    let log_file_for_cleaner = log_file.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(300)); // 每5分钟清理一次
+        // 可配置的保留时间（通过环境变量）
+        let keep_completed_hours = std::env::var("KEEP_COMPLETED_HOURS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(24); // 默认24小时
+        let keep_failed_hours = std::env::var("KEEP_FAILED_HOURS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(1); // 默认1小时
+
+        log_print(
+            log_file_for_cleaner.as_ref(),
+            &format!("[Cleanup] Task retention: completed={}h, failed={}h",
+                    keep_completed_hours, keep_failed_hours),
+        );
+
+        let mut interval = tokio::time::interval(Duration::from_secs(300)); // 每5分钟执行一次
         loop {
             interval.tick().await;
             let now = SystemTime::now();
-            let mut tracker = cleaner_state.poll_tracker.write().await;
-            tracker.retain(|_, info| {
-                // 保留最近5分钟内有活动的记录
-                now.duration_since(info.last_logged)
-                    .unwrap_or(Duration::from_secs(0))
-                    < Duration::from_secs(300)
-            });
+
+            // 清理轮询记录
+            {
+                let mut tracker = cleaner_state.poll_tracker.write().await;
+                let before = tracker.len();
+                tracker.retain(|_, info| {
+                    // 保留最近5分钟内有活动的记录
+                    now.duration_since(info.last_logged)
+                        .unwrap_or(Duration::from_secs(0))
+                        < Duration::from_secs(300)
+                });
+                if before > tracker.len() {
+                    log_print(
+                        cleaner_state.log_file.as_ref(),
+                        &format!("[Cleanup] Removed {} inactive poll records", before - tracker.len()),
+                    );
+                }
+            }
+
+            // 清理任务记录
+            {
+                let mut jobs = cleaner_state.jobs.write().await;
+                let before = jobs.len();
+                jobs.retain(|id, job| {
+                    match &job.status {
+                        // 保留正在运行的任务
+                        JobStatus::Running { .. } => true,
+                        // 保留最近的待处理任务（1小时内）
+                        JobStatus::Pending => {
+                            now.duration_since(job.submitted_at)
+                                .unwrap_or(Duration::from_secs(0))
+                                < Duration::from_secs(3600)
+                        }
+                        // 保留最近完成的任务
+                        JobStatus::Completed { finished_at, .. } => {
+                            now.duration_since(*finished_at)
+                                .unwrap_or(Duration::from_secs(0))
+                                < Duration::from_secs(keep_completed_hours * 3600)
+                        }
+                        // 保留最近失败的任务（允许重试）
+                        JobStatus::Failed { finished_at, .. } => {
+                            now.duration_since(*finished_at)
+                                .unwrap_or(Duration::from_secs(0))
+                                < Duration::from_secs(keep_failed_hours * 3600)
+                        }
+                    }
+                });
+                if before > jobs.len() {
+                    log_print(
+                        cleaner_state.log_file.as_ref(),
+                        &format!("[Cleanup] Removed {} expired jobs (completed: 24h, failed/pending: 1h)",
+                                before - jobs.len()),
+                    );
+                }
+            }
         }
     });
 
@@ -423,6 +524,7 @@ async fn create_job(
                             outpoint
                         ),
                     );
+                    // 返回已完成的结果，永远不删除已完成的任务
                     return Ok((StatusCode::OK, Json(existing_job.to_create_response(&outpoint))));
                 }
                 JobStatus::Pending => {
@@ -437,7 +539,7 @@ async fn create_job(
                     return Ok((StatusCode::OK, Json(existing_job.to_create_response(&outpoint))));
                 }
                 JobStatus::Failed { .. } => {
-                    // 如果之前失败了，允许重试，但先删除旧记录
+                    // 如果之前失败了，允许重试
                     log_print(
                         state.log_file.as_ref(),
                         &format!(
@@ -445,15 +547,20 @@ async fn create_job(
                             outpoint
                         ),
                     );
+                    // 继续执行，下面会删除失败的记录
                 }
             }
         }
     }
 
-    // 移除失败的任务记录（如果存在）
+    // 只删除失败的任务记录以允许重试
     {
         let mut jobs = state.jobs.write().await;
-        jobs.remove(&outpoint);
+        if let Some(job) = jobs.get(&outpoint) {
+            if matches!(job.status, JobStatus::Failed { .. }) {
+                jobs.remove(&outpoint);
+            }
+        }
     }
 
     let (status, response) = submit_job(&state, outpoint, config, wait).await?;
