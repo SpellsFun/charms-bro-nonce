@@ -638,15 +638,22 @@ fn run_on_device(
                 let mut batch_nonce_best: u64 = 0;
                 d_best_lz.copy_to(&mut batch_lz)?;
                 d_best_nonce.copy_to(&mut batch_nonce_best)?;
+
+                // 只在找到更好结果时输出日志
                 if batch_lz > best_lz {
+                    println!(
+                        "[GPU {}] Found better result! best_lz={} nonce={} at batch={}",
+                        device_idx, batch_lz, batch_nonce_best, batch_idx
+                    );
                     best_lz = batch_lz;
                     best_nonce = batch_nonce_best;
                 }
 
-                if batch_idx % 10 == 0 || batch_idx + 1 == num_batches {
+                // 完成时输出最终结果
+                if batch_idx + 1 == num_batches {
                     println!(
-                        "[GPU {}] Batch {} done, current best_lz={} nonce={} current={}",
-                        device_idx, batch_idx, best_lz, best_nonce, start_nonce
+                        "[GPU {}] Completed all batches. Final best_lz={} nonce={}",
+                        device_idx, best_lz, best_nonce
                     );
                 }
 

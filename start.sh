@@ -59,11 +59,24 @@ else
     echo "Auth: Disabled"
 fi
 
-# 后台启动
+# 创建日志文件（如果不存在）
+touch "$LOG_FILE"
+
+# 创建一个临时的启动脚本，确保所有输出都被捕获
+cat > /tmp/bro-start-$$.sh << 'EOF'
+#!/bin/bash
+exec 1>> "$LOG_FILE"
+exec 2>&1
+exec "$BIN_PATH"
+EOF
+chmod +x /tmp/bro-start-$$.sh
+
+# 后台启动，使用临时脚本确保所有输出都重定向
 LOG_FILE="$LOG_FILE" \
 AUTH_TOKEN="$AUTH_TOKEN" \
 PORT="$PORT" \
-nohup "$BIN_PATH" > /dev/null 2>&1 &
+BIN_PATH="$BIN_PATH" \
+nohup /tmp/bro-start-$$.sh > /dev/null 2>&1 &
 
 # 保存PID
 PID=$!
@@ -72,14 +85,18 @@ echo $PID > "$PID_FILE"
 # 等待1秒检查是否成功启动
 sleep 1
 if kill -0 $PID 2>/dev/null; then
+    # 清理临时脚本
+    rm -f /tmp/bro-start-$$.sh
+
     echo -e "${GREEN}BRO API started successfully with PID $PID${NC}"
     echo ""
     echo "Commands:"
     echo "  View logs:    tail -f $LOG_FILE"
     echo "  Stop server:  ./stop.sh"
-    echo "  Check status: ps aux | grep $PID"
+    echo "  Check status: ./status.sh"
 else
     echo -e "${RED}Failed to start BRO API${NC}"
     rm -f "$PID_FILE"
+    rm -f /tmp/bro-start-$$.sh
     exit 1
 fi
