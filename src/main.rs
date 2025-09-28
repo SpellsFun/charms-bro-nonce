@@ -3,14 +3,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use http_body_util::BodyExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{RwLock, Semaphore};
@@ -488,10 +486,11 @@ async fn auth_middleware(
             let outpoint_info = if path.starts_with("/api/v1/jobs") {
                 if method == Method::POST {
                     // 对于POST请求，读取body中的outpoint（因为认证失败，后续不会使用body）
-                    let (parts, body) = request.into_parts();
-                    match body.collect().await {
-                        Ok(collected) => {
-                            let bytes = collected.to_bytes();
+                    let (_parts, body) = request.into_parts();
+
+                    // 使用axum的方法读取body
+                    match axum::body::to_bytes(body, usize::MAX).await {
+                        Ok(bytes) => {
                             if let Ok(json_str) = std::str::from_utf8(&bytes) {
                                 if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(json_str) {
                                     if let Some(outpoint) = json_value.get("outpoint").and_then(|v| v.as_str()) {
