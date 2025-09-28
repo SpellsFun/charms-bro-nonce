@@ -3,8 +3,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::extract::{ConnectInfo, Path, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -18,6 +19,7 @@ use bro::{run_search, SearchConfig, SearchOutcome, MAX_ILP};
 struct AppState {
     jobs: Arc<RwLock<HashMap<String, Job>>>,
     concurrency: Arc<Semaphore>,
+    auth_token: Option<String>,
 }
 
 struct Job {
@@ -271,27 +273,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(8001u16);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
+    // 从环境变量获取认证token
+    let auth_token = std::env::var("AUTH_TOKEN").ok();
+    if let Some(ref token) = auth_token {
+        println!("API authentication enabled with token: {}...", &token[..token.len().min(8)]);
+    } else {
+        println!("WARNING: API authentication disabled (no AUTH_TOKEN set)");
+    }
+
     let state = AppState {
         jobs: Arc::new(RwLock::new(HashMap::new())),
         concurrency: Arc::new(Semaphore::new(1)),
+        auth_token,
     };
 
     let app = Router::new()
         .route("/api/v1/jobs", post(create_job).get(list_jobs))
         .route("/api/v1/jobs/{id}", get(get_job))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
         .with_state(state.clone());
 
     println!("bro API server listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
 async fn create_job(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
     Json(payload): Json<CreateJobRequest>,
 ) -> Result<(StatusCode, Json<CreateJobResponse>), ApiError> {
     let outpoint = payload.outpoint.trim().to_string();
+
+    // 记录请求日志
+    println!(
+        "[Request] IP: {}, Outpoint: {}, Wait: {}",
+        addr.ip(),
+        outpoint,
+        payload.wait.unwrap_or(false)
+    );
+
     if outpoint.is_empty() {
         return Err(ApiError::bad_request("outpoint must not be empty"));
     }
@@ -315,9 +344,12 @@ async fn create_job(
 }
 
 async fn get_job(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<JobResponse>), ApiError> {
+    // 记录请求日志
+    println!("[Request] IP: {}, Get Job: {}", addr.ip(), id);
     if let Some(resp) = {
         let jobs = state.jobs.read().await;
         jobs.get(&id).map(|job| job.to_response(&id))
@@ -339,7 +371,12 @@ async fn get_job(
     Ok((status, Json(job.to_response(&id))))
 }
 
-async fn list_jobs(State(state): State<AppState>) -> Result<Json<Vec<JobResponse>>, ApiError> {
+async fn list_jobs(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<JobResponse>>, ApiError> {
+    // 记录请求日志
+    println!("[Request] IP: {}, List Jobs", addr.ip());
     let jobs = state.jobs.read().await;
     let mut entries: Vec<JobResponse> = jobs.iter().map(|(id, job)| job.to_response(id)).collect();
     entries.sort_by_key(|resp| resp.submitted_at);
@@ -417,6 +454,41 @@ fn system_time_to_secs(t: SystemTime) -> u64 {
     t.duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_else(|_| Duration::from_secs(0))
         .as_secs()
+}
+
+// 认证中间件
+async fn auth_middleware(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    // 如果设置了认证token，则验证
+    if let Some(ref expected_token) = state.auth_token {
+        let auth_header = headers
+            .get("authorization")
+            .and_then(|h| h.to_str().ok());
+
+        let valid = match auth_header {
+            Some(header) if header.starts_with("Bearer ") => {
+                let token = &header[7..];
+                token == expected_token
+            }
+            _ => false,
+        };
+
+        if !valid {
+            println!(
+                "[Auth Failed] IP: {}, Path: {}",
+                addr.ip(),
+                request.uri().path()
+            );
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    Ok(next.run(request).await)
 }
 
 fn apply_options(config: &mut SearchConfig, opts: SearchOptions) -> Result<(), ApiError> {
