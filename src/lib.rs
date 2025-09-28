@@ -231,6 +231,9 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
 
     // 输出GPU任务分配信息
     if !tasks.is_empty() {
+        println!("[{}] [Task] Outpoint: {}",
+            Local::now().format("%Y-%m-%d %H:%M:%S"),
+            config.outpoint);
         println!("[{}] [Task] Range: {} to {}, Total: {} nonces",
             Local::now().format("%Y-%m-%d %H:%M:%S"),
             config.start_nonce_all,
@@ -254,7 +257,7 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
     let gpu_count = assigned_gpus.len();
 
     let t0 = Instant::now();
-    let fixed_bytes = config.outpoint.into_bytes();
+    let fixed_bytes = config.outpoint.clone().into_bytes();
 
     let mut handles = Vec::new();
     let mut shared_states: Vec<Arc<SharedState>> = Vec::new();
@@ -262,6 +265,7 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
 
     for (gpu, cfg) in tasks.into_iter() {
         let bytes = fixed_bytes.clone();
+        let outpoint_copy = config.outpoint.clone();
         let st = Arc::new(SharedState {
             done: AtomicU64::new(0),
             best_lz: AtomicU32::new(0),
@@ -272,7 +276,7 @@ pub fn run_search(config: SearchConfig) -> Result<SearchOutcome, DynError> {
         let st_for_err = st.clone();
         shared_states.push(st.clone());
         handles.push(thread::spawn(move || -> Result<(u32, u64), DynError> {
-            match run_on_device(gpu, &bytes, &cfg, Some(st)) {
+            match run_on_device(gpu, &bytes, &cfg, Some(st), &outpoint_copy) {
                 Ok(res) => Ok((res.best_lz, res.best_nonce)),
                 Err(e) => {
                     st_for_err.finished.store(true, Ordering::SeqCst);
@@ -411,6 +415,7 @@ fn run_on_device(
     fixed: &[u8],
     cfg: &GpuConfig,
     shared: Option<Arc<SharedState>>,
+    outpoint: &str,
 ) -> Result<GpuResult, DynError> {
     let device = Device::get_device(device_idx)?;
     let _ctx = Context::create_and_push(ContextFlags::MAP_HOST | ContextFlags::SCHED_AUTO, device)?;
@@ -646,9 +651,9 @@ fn run_on_device(
                 // 只在找到更好结果时输出日志
                 if batch_lz > best_lz {
                     println!(
-                        "[{}] [GPU {}] Found better result! best_lz={} nonce={} at batch={}",
+                        "[{}] [GPU {}] Found better result! outpoint={} best_lz={} nonce={} at batch={}",
                         chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-                        device_idx, batch_lz, batch_nonce_best, batch_idx
+                        device_idx, outpoint, batch_lz, batch_nonce_best, batch_idx
                     );
                     best_lz = batch_lz;
                     best_nonce = batch_nonce_best;
@@ -657,9 +662,9 @@ fn run_on_device(
                 // 完成时输出最终结果
                 if batch_idx + 1 == num_batches {
                     println!(
-                        "[{}] [GPU {}] Completed all batches. Final best_lz={} nonce={}",
+                        "[{}] [GPU {}] Completed. outpoint={} Final best_lz={} nonce={}",
                         chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-                        device_idx, best_lz, best_nonce
+                        device_idx, outpoint, best_lz, best_nonce
                     );
                 }
 

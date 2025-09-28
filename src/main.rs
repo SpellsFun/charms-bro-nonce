@@ -23,6 +23,14 @@ struct AppState {
     concurrency: Arc<Semaphore>,
     auth_token: Option<String>,
     log_file: Option<Arc<Mutex<File>>>,
+    poll_tracker: Arc<RwLock<HashMap<String, PollInfo>>>,
+}
+
+#[derive(Clone)]
+struct PollInfo {
+    last_logged: SystemTime,
+    count: u32,
+    last_summary: SystemTime,
 }
 
 struct Job {
@@ -318,6 +326,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         concurrency: Arc::new(Semaphore::new(1)),
         auth_token,
         log_file: log_file.clone(),
+        poll_tracker: Arc::new(RwLock::new(HashMap::new())),
     };
 
     let app = Router::new()
@@ -333,6 +342,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         log_file.as_ref(),
         &format!("Server listening on {}", addr),
     );
+
+    // 启动清理任务，定期清理过期的轮询记录
+    let cleaner_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(300)); // 每5分钟清理一次
+        loop {
+            interval.tick().await;
+            let now = SystemTime::now();
+            let mut tracker = cleaner_state.poll_tracker.write().await;
+            tracker.retain(|_, info| {
+                // 保留最近5分钟内有活动的记录
+                now.duration_since(info.last_logged)
+                    .unwrap_or(Duration::from_secs(0))
+                    < Duration::from_secs(300)
+            });
+        }
+    });
+
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(
         listener,
@@ -387,11 +414,51 @@ async fn get_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<JobResponse>), ApiError> {
-    // 记录请求日志
-    log_print(
-        state.log_file.as_ref(),
-        &format!("[Request] IP: {}, Get Job: {}", addr.ip(), id),
-    );
+    // 智能轮询日志记录
+    let poll_key = format!("{}:{}", addr.ip(), id);
+    let now = SystemTime::now();
+    let should_log = {
+        let mut tracker = state.poll_tracker.write().await;
+        let info = tracker.entry(poll_key.clone()).or_insert(PollInfo {
+            last_logged: now,
+            count: 0,
+            last_summary: now,
+        });
+
+        info.count += 1;
+
+        // 每30秒记录一次详细日志
+        let time_since_log = now.duration_since(info.last_logged).unwrap_or(Duration::from_secs(0));
+        let time_since_summary = now.duration_since(info.last_summary).unwrap_or(Duration::from_secs(0));
+
+        // 每分钟输出汇总
+        if time_since_summary >= Duration::from_secs(60) && info.count > 1 {
+            log_print(
+                state.log_file.as_ref(),
+                &format!(
+                    "[Poll Summary] IP: {}, Job: {} - {} polls in last minute",
+                    addr.ip(), id, info.count
+                ),
+            );
+            info.count = 0;
+            info.last_summary = now;
+            info.last_logged = now;
+            false  // 汇总后不记录单次请求
+        } else if time_since_log >= Duration::from_secs(30) || info.count == 1 {
+            // 首次或超过30秒记录
+            info.last_logged = now;
+            true
+        } else {
+            false
+        }
+    };
+
+    if should_log {
+        log_print(
+            state.log_file.as_ref(),
+            &format!("[Request] IP: {}, Get Job: {}", addr.ip(), id),
+        );
+    }
     if let Some(resp) = {
         let jobs = state.jobs.read().await;
         jobs.get(&id).map(|job| job.to_response(&id))
@@ -417,7 +484,7 @@ async fn list_jobs(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<JobResponse>>, ApiError> {
-    // 记录请求日志
+    // 对list操作不进行去重，因为它们通常不会频繁轮询
     log_print(
         state.log_file.as_ref(),
         &format!("[Request] IP: {}, List Jobs", addr.ip()),
