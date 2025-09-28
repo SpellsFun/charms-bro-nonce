@@ -557,8 +557,29 @@ fn run_on_device(
 
             let mut final_done = cfg.total_nonce;
             d_next_index.copy_to(&mut final_done)?;
+
+            // 强制限制，防止超过配置的total_nonce
             if final_done > cfg.total_nonce {
+                println!(
+                    "[{}] [Warning] GPU {} exceeded limit: processed {} but limit was {}",
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                    device_idx,
+                    final_done,
+                    cfg.total_nonce
+                );
                 final_done = cfg.total_nonce;
+            }
+
+            // 额外检查：确保不超过全局最大限制
+            if final_done > MAX_TOTAL_NONCE {
+                println!(
+                    "[{}] [Error] GPU {} exceeded MAX limit: processed {} but max is {}",
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                    device_idx,
+                    final_done,
+                    MAX_TOTAL_NONCE
+                );
+                final_done = MAX_TOTAL_NONCE;
             }
 
             let reduce_threads = {
