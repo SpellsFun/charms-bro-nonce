@@ -1,8 +1,9 @@
-# bro: 多 GPU 双重 SHA‑256 碰撞搜索器（Rust + CUDA）
+# bro: 多加速器（GPU / FPGA）双重 SHA‑256 碰撞搜索器（Rust + CUDA / OpenCL）
 
 本项目在 GPU 上并行搜索使 `SHA256(SHA256(outpoint + nonce))` 具有最多前导零位（leading zeros）的 `nonce`，并提供 REST API 供外部调用。
 
 - 多 GPU 并行：按权重切分工作量，每张卡独立推进进度。
+- 可选 FPGA 后端：针对 AWS F2/F1 实例，通过预编译 `.xclbin` 执行相同的双 SHA‑256 扫描逻辑。
 - 两种执行模式：
   - 批处理模式（默认）：主机按批次下发工作，适合中小规模或调试。
   - 持久化内核（`PERSISTENT=1`）：设备端自取任务，减少往返开销，适合长时间跑满。
@@ -12,10 +13,10 @@
 
 
 **环境要求**
-- NVIDIA GPU 与驱动（可用 `nvidia-smi` 检查）。
-- CUDA Toolkit（含 `nvcc`，用于构建 CUBIN/PTX）。
+- NVIDIA GPU 与驱动（可用 `nvidia-smi` 检查），用于 CUDA 后端。
+- 或 AWS F2/F1 FPGA 实例，并安装 AWS FPGA SDK / Xilinx Vitis（用于编译、加载 `.xclbin`）。
 - Rust 工具链（`cargo`，edition 2021）。
-- 建议 Linux 环境；Windows/WSL 需确保 CUDA 可用。macOS 无原生 NVIDIA 支持。
+- 建议 Linux 环境；Windows/WSL 需确保 CUDA/FPGA 驱动可用。macOS 无原生 NVIDIA 支持。
 
 
 **快速安装与启动流程**
@@ -44,6 +45,8 @@
 - `src/main.rs`：Axum 入口，暴露 `/api/v1` HTTP 接口。
 - `sha256_kernel.cu`：CUDA 内核（`double_sha256_max_kernel`、`double_sha256_persistent_kernel(_ascii)`、`reduce_best_kernel` 等）。
 - `build_cubin_ada.sh`：生成多架构 `sha256_kernel.cubin`，失败时回退生成 `sha256_kernel.ptx`。
+- `fpga/`：FPGA OpenCL 核心及构建说明，适用于 AWS F2/F1 实例。
+  - `fpga/build.sh`：简易 `v++` 编译脚本，生成 `.xclbin`；运行前需设置 `PLATFORM` 环境变量并 source XRT 环境。
 
 
 **构建与运行**
@@ -57,7 +60,8 @@
   - 限制寄存器（可影响性能/占用）：
     - `RREG=80 ./build_cubin_ada.sh`
 - 启动 REST API 服务（默认端口 8001，可通过 `PORT` 覆盖）：
-  - `cargo run --release`
+  - CUDA 默认开启：`cargo run --release`
+  - 启用 FPGA 支持（需预先编译 `.xclbin`）：`cargo run --release --features fpga`
 - 停止服务：`Ctrl+C`；持久化模式下会等待当前 chunk 收尾。
 
 
@@ -74,6 +78,11 @@
   - `docker tag charms-bro-nonce youruser/charms-bro-nonce:latest`
   - `docker login`
   - `docker push youruser/charms-bro-nonce:latest`
+
+**FPGA 后端快速指引**
+- 编译 `fpga/kernels/double_sha256.cl` 为 `.xclbin`（详见 `fpga/README.md`）。
+- 启动服务前确保 `fpga-mgmt` 驱动与 XRT 环境就绪，并在 `options.fpga` 中指定 `xclbin_path`。
+- 运行时通过 `backend=fpga` 切换驱动；若同时编译 `cuda,fpga` 特性，可根据任务动态选择。
 
 
 **API 使用**
@@ -103,6 +112,7 @@
 - `total_nonce` (`u64`，默认 `100_000_000_000_000`)：最大搜索次数上限，任务会一直运行到消耗完这部分 nonce 或手动终止。
 - `start_nonce` (`u64`，默认 `0`)：搜索起始 nonce。
 - `batch_size` (`u64`，默认 `1_000_000_000`)：批处理模式下一次下发的工作量；`0` 表示单批完成。
+- `backend` (`string`，默认 `cuda`)：可选 `cuda` 或 `fpga`。选择 `fpga` 时需提供 `options.fpga` 字段并预先加载 `.xclbin`。
 - `threads_per_block` (`u32`，默认 `256`)：每个 block 的线程数。
 - `blocks` (`u32`，默认 `1024`)：一次 launch 的 block 数。
 - `binary_nonce` (`bool`，默认 `false`)：`true` 走 8 字节二进制 nonce（以 little-endian 拼接到消息末尾），`false` 走十进制 ASCII。
@@ -113,6 +123,11 @@
 - `odometer` (`bool`，默认 `true`)：持久化内核是否启用计数器输出。
 - `gpu_ids` (`[u32]`，默认全卡)：指定使用的 GPU 索引。
 - `gpu_weights` (`[f64]`)：与 `gpu_ids` 对齐的权重，决定工作量占比。
+- `fpga` (`object`，仅当后台编译时启用 `fpga` 特性有效)：
+  - `slot_id` (`u32`，默认 `0`)：物理插槽索引。
+  - `xclbin_path` (`string`，必填)：编译好的 `.xclbin` 文件路径。
+  - `batches_per_exec` (`u32`，默认 `8192`)：单次内核调用处理的 nonce 数量。
+  - `streams` (`u32`，默认 `1`)：预期并行计算单元数量（需要自行在内核中复制）。
 
 根级字段：
 - `outpoint` (`string`，必填)：通常为 `txid:index` 这样的交易输出标识，会同时作为搜索前缀与 `job_id`。

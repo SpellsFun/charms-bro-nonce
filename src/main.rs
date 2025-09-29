@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{RwLock, Semaphore};
 
-use bro::{run_search, SearchConfig, SearchOutcome, MAX_ILP};
+use bro::{run_search, BackendKind, SearchConfig, SearchOutcome, MAX_ILP};
+#[cfg(feature = "fpga")]
+use bro::FpgaRuntimeConfig;
 
 #[derive(Clone)]
 struct AppState {
@@ -79,6 +81,19 @@ struct SearchOptions {
     odometer: Option<bool>,
     gpu_ids: Option<Vec<u32>>,
     gpu_weights: Option<Vec<f64>>,
+    backend: Option<String>,
+    #[cfg(feature = "fpga")]
+    fpga: Option<FpgaOptions>,
+}
+
+#[cfg(feature = "fpga")]
+#[derive(Deserialize, Default, Debug)]
+struct FpgaOptions {
+    slot_id: Option<u32>,
+    xclbin_path: Option<String>,
+    dma_buffer_bytes: Option<u32>,
+    batches_per_exec: Option<u32>,
+    streams: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -812,6 +827,47 @@ fn log_print(log_file: Option<&Arc<Mutex<File>>>, message: &str) {
 fn apply_options(config: &mut SearchConfig, opts: SearchOptions) -> Result<(), ApiError> {
     // 记录接收到的参数
     let mut applied = Vec::new();
+
+    if let Some(backend_str) = opts.backend {
+        let kind = BackendKind::from_str(&backend_str).ok_or_else(|| {
+            ApiError::bad_request(format!("unsupported backend: {backend_str}"))
+        })?;
+        config.backend = kind;
+        applied.push(format!("backend={}", kind.as_str()));
+    }
+
+    #[cfg(feature = "fpga")]
+    if let Some(fpga_opts) = opts.fpga {
+        let runtime = config
+            .fpga
+            .get_or_insert_with(FpgaRuntimeConfig::default);
+
+        if config.backend != BackendKind::Fpga {
+            config.backend = BackendKind::Fpga;
+            applied.push("backend=fpga".to_string());
+        }
+
+        if let Some(slot) = fpga_opts.slot_id {
+            runtime.slot_id = slot;
+            applied.push(format!("fpga.slot_id={slot}"));
+        }
+        if let Some(path) = fpga_opts.xclbin_path {
+            runtime.xclbin_path = Some(path.clone());
+            applied.push(format!("fpga.xclbin={path}"));
+        }
+        if let Some(bytes) = fpga_opts.dma_buffer_bytes {
+            runtime.dma_buffer_bytes = bytes;
+            applied.push(format!("fpga.dma_buffer_bytes={bytes}"));
+        }
+        if let Some(batch) = fpga_opts.batches_per_exec {
+            runtime.batches_per_exec = batch;
+            applied.push(format!("fpga.batches_per_exec={batch}"));
+        }
+        if let Some(streams) = fpga_opts.streams {
+            runtime.streams = streams;
+            applied.push(format!("fpga.streams={streams}"));
+        }
+    }
 
     if let Some(v) = opts.total_nonce {
         // 限制total_nonce最大为2万亿

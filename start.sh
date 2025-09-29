@@ -7,6 +7,10 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# 加速器选择（默认 GPU）
+ACCEL_SELECTION="${1:-gpu}"
+ACCEL_SELECTION=$(echo "$ACCEL_SELECTION" | tr '[:upper:]' '[:lower:]')
+
 # 配置文件
 PID_FILE="./bro-api.pid"
 DEFAULT_LOG_FILE="./bro-api.log"
@@ -45,6 +49,32 @@ fi
 # 设置二进制文件路径
 BIN_PATH="./target/release/bro"
 
+# 根据加速器选择配置内核构建与 Cargo 特性
+declare -a CARGO_ARGS
+declare -a KERNEL_TASKS
+
+case "$ACCEL_SELECTION" in
+    gpu|cuda)
+        ACCEL_SELECTION="gpu"
+        CARGO_ARGS=(build --release)
+        KERNEL_TASKS+=("gpu")
+        ;;
+    fpga)
+        CARGO_ARGS=(build --release --no-default-features --features fpga)
+        KERNEL_TASKS+=("fpga")
+        ;;
+    both|all)
+        ACCEL_SELECTION="both"
+        CARGO_ARGS=(build --release --features fpga)
+        KERNEL_TASKS+=("gpu" "fpga")
+        ;;
+    *)
+        echo -e "${RED}Unknown accelerator option: $ACCEL_SELECTION${NC}"
+        echo "请使用 ./start.sh [gpu|fpga|both]"
+        exit 1
+        ;;
+esac
+
 # 根据标志决定是否编译
 if [ "$SKIP_BUILD" = "1" ]; then
     echo -e "${BLUE}Skipping compilation (SKIP_BUILD=1)${NC}"
@@ -55,10 +85,28 @@ if [ "$SKIP_BUILD" = "1" ]; then
     fi
 else
     # 自动编译以确保使用最新代码
-    echo -e "${GREEN}Compiling latest code...${NC}"
+    for task in "${KERNEL_TASKS[@]}"; do
+        case "$task" in
+            gpu)
+                echo -e "${GREEN}Building CUDA kernel (build_cubin_ada.sh)...${NC}"
+                if ! ./build_cubin_ada.sh; then
+                    echo -e "${RED}CUDA kernel build failed${NC}"
+                    exit 1
+                fi
+                ;;
+            fpga)
+                echo -e "${GREEN}Building FPGA bitstream (fpga/build.sh)...${NC}"
+                if ! ./fpga/build.sh; then
+                    echo -e "${RED}FPGA kernel build failed${NC}"
+                    exit 1
+                fi
+                ;;
+        esac
+    done
+
+    echo -e "${GREEN}Compiling latest code for ${ACCEL_SELECTION}...${NC}"
     echo -e "${YELLOW}(Use SKIP_BUILD=1 to skip compilation for faster restart)${NC}"
-    cargo build --release
-    if [ $? -ne 0 ]; then
+    if ! cargo "${CARGO_ARGS[@]}"; then
         echo -e "${RED}Build failed!${NC}"
         exit 1
     fi
@@ -66,7 +114,7 @@ else
 fi
 
 # 启动服务
-echo -e "${GREEN}Starting BRO API Server...${NC}"
+echo -e "${GREEN}Starting BRO API Server (mode: ${ACCEL_SELECTION})...${NC}"
 echo "Port: $PORT"
 echo "Log file: $LOG_FILE"
 if [ ! -z "$AUTH_TOKEN" ]; then
@@ -92,6 +140,7 @@ LOG_FILE="$LOG_FILE" \
 AUTH_TOKEN="$AUTH_TOKEN" \
 PORT="$PORT" \
 BIN_PATH="$BIN_PATH" \
+BRO_ACCELERATOR_MODE="$ACCEL_SELECTION" \
 nohup /tmp/bro-start-$$.sh > /dev/null 2>&1 &
 
 # 保存PID
