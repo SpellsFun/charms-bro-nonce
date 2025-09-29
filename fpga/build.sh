@@ -14,11 +14,12 @@ usage() {
   VPP        可选，v++ 路径（默认直接调用 v++）
   TARGET     可选，编译目标：hw | hw_emu | sw_emu（默认 hw）
   KERNEL     可选，内核源码路径（默认 fpga/kernels/double_sha256.cl）
-  FREQ_MHZ   可选，期望频率（MHz），通过 --kernel_frequency 传递，默认空
+  FREQ_MHZ   可选，期望频率（MHz），通过 --kernel_frequency 传递
   SAVE_TEMPS 可选，非空时追加 --save-temps
+  XO_OUTPUT  可选，自定义中间 .xo 路径（默认根据输出名生成）
 
 位置参数：
-  1          输出文件名（默认 double_sha256.awsxclbin）
+  1          最终 .xclbin 输出文件名（默认 double_sha256.awsxclbin）
 USAGE
 }
 
@@ -37,24 +38,47 @@ VPP_BIN=${VPP:-v++}
 TARGET_MODE=${TARGET:-hw}
 KERNEL_SRC=${KERNEL:-fpga/kernels/double_sha256.cl}
 OUTPUT=${1:-double_sha256.awsxclbin}
-FREQ_FLAG=()
+XO_OUTPUT=${XO_OUTPUT:-${OUTPUT%.awsxclbin}.xo}
+
+declare -a FREQ_FLAG=()
 if [[ -n "${FREQ_MHZ:-}" ]]; then
     FREQ_FLAG=("--kernel_frequency" "${FREQ_MHZ}")
 fi
-SAVE_FLAG=()
+
+declare -a SAVE_FLAG=()
 if [[ -n "${SAVE_TEMPS:-}" ]]; then
     SAVE_FLAG=("--save-temps")
 fi
 
-set -x
-"${VPP_BIN}" \
+# 编译阶段：CL -> XO
+COMPILE_CMD=("${VPP_BIN}" \
+    -c \
     -t "${TARGET_MODE}" \
     --platform "${PLATFORM}" \
     -k double_sha256_fpga \
+    -o "${XO_OUTPUT}" \
+    "${KERNEL_SRC}")
+if ((${#FREQ_FLAG[@]})); then
+    COMPILE_CMD+=("${FREQ_FLAG[@]}")
+fi
+if ((${#SAVE_FLAG[@]})); then
+    COMPILE_CMD+=("${SAVE_FLAG[@]}")
+fi
+
+# 链接阶段：XO -> XCLBIN
+LINK_CMD=("${VPP_BIN}" \
+    -l \
+    -t "${TARGET_MODE}" \
+    --platform "${PLATFORM}" \
     -o "${OUTPUT}" \
-    "${FREQ_FLAG[@]}" \
-    "${SAVE_FLAG[@]}" \
-    "${KERNEL_SRC}"
+    "${XO_OUTPUT}")
+if ((${#SAVE_FLAG[@]})); then
+    LINK_CMD+=("${SAVE_FLAG[@]}")
+fi
+
+set -x
+"${COMPILE_CMD[@]}"
+"${LINK_CMD[@]}"
 set +x
 
 echo "[build.sh] 编译完成: ${OUTPUT}"

@@ -10,7 +10,11 @@ __constant uint K256[64] = {
 };
 
 inline uint rotr32(uint x, uint n) {
-    return rotate(x, (int)(32 - n));
+    uint s = n & 31u;
+    if (s == 0u) {
+        return x;
+    }
+    return (x >> s) | (x << (32u - s));
 }
 
 inline void sha256_compress(const uchar block[64], uint state[8]) {
